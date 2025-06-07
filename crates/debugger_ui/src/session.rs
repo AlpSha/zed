@@ -126,6 +126,15 @@ impl DebugSession {
         &self.running_state
     }
 
+    pub(crate) fn adapter_name(&self, cx: &App) -> dap::adapters::DebugAdapterName {
+        self.running_state
+            .read(cx)
+            .session()
+            .read(cx)
+            .adapter_name()
+            .clone()
+    }
+
     pub(crate) fn label_element(&self, cx: &App) -> AnyElement {
         let label = self.label(cx);
 

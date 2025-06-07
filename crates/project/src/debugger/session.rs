@@ -862,6 +862,10 @@ impl Session {
         &self.capabilities
     }
 
+    pub fn adapter_name(&self) -> &DebugAdapterName {
+        &self.adapter
+    }
+
     pub fn binary(&self) -> &DebugAdapterBinary {
         let Mode::Running(local_mode) = &self.mode else {
             panic!("Session is not running");
@@ -2152,6 +2156,23 @@ impl Session {
         };
 
         self.request(command, Self::empty_response, cx).detach()
+    }
+
+    pub fn hot_reload(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        // Check if we're running a Flutter/Dart session
+        if self.adapter.0 != "Dart" {
+            return Task::ready(());
+        }
+
+        // Flutter/Dart debug adapter supports hot reload through evaluate request
+        // with a special expression "$hotReload"
+        self.evaluate(
+            "$hotReload".to_string(),
+            Some(EvaluateArgumentsContext::Repl),
+            None,
+            None,
+            cx,
+        )
     }
 
     pub fn terminate_threads(&mut self, thread_ids: Option<Vec<ThreadId>>, cx: &mut Context<Self>) {

@@ -3,7 +3,7 @@ use crate::session::DebugSession;
 use crate::session::running::RunningState;
 use crate::{
     ClearAllBreakpoints, Continue, Detach, FocusBreakpointList, FocusConsole, FocusFrames,
-    FocusLoadedSources, FocusModules, FocusTerminal, FocusVariables, Pause, Restart,
+    FocusLoadedSources, FocusModules, FocusTerminal, FocusVariables, HotReload, Pause, Restart,
     ShowStackTrace, StepBack, StepInto, StepOut, StepOver, Stop, ToggleIgnoreBreakpoints,
     ToggleSessionPicker, ToggleThreadPicker, persistence,
 };
@@ -157,7 +157,7 @@ impl DebugPanel {
             TypeId::of::<ToggleIgnoreBreakpoints>(),
         ];
 
-        let running_action_types = [TypeId::of::<Pause>()];
+        let running_action_types = [TypeId::of::<Pause>(), TypeId::of::<HotReload>()];
 
         let stopped_action_type = [
             TypeId::of::<Continue>(),
@@ -729,6 +729,37 @@ impl DebugPanel {
                                                 }
                                             }),
                                     )
+                                    .when({
+                                        let adapter_name = active_session
+                                            .as_ref()
+                                            .map(|session| session.read(cx).adapter_name())
+                                            .map(|name| name.0.as_str())
+                                            .unwrap_or("");
+                                        adapter_name == "Dart"
+                                    }, |this| {
+                                        this.child(
+                                            IconButton::new("debug-hot-reload", IconName::RotateCw)
+                                                .icon_size(IconSize::XSmall)
+                                                .on_click(window.listener_for(
+                                                    &running_state,
+                                                    |this, _, _window, cx| {
+                                                        this.hot_reload(cx);
+                                                    },
+                                                ))
+                                                .tooltip({
+                                                    let focus_handle = focus_handle.clone();
+                                                    move |window, cx| {
+                                                        Tooltip::for_action_in(
+                                                            "Hot Reload",
+                                                            &crate::HotReload,
+                                                            &focus_handle,
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    }
+                                                }),
+                                        )
+                                    })
                                     .child(
                                         IconButton::new("debug-stop", IconName::Power)
                                             .icon_size(IconSize::XSmall)

@@ -47,6 +47,7 @@ actions!(
         ShowStackTrace,
         ToggleThreadPicker,
         ToggleSessionPicker,
+        HotReload,
     ]
 );
 
@@ -197,6 +198,17 @@ pub fn init(cx: &mut App) {
                 )
                 .register_action(|workspace: &mut Workspace, _: &Start, window, cx| {
                     NewSessionModal::show(workspace, window, cx);
+                })
+                .register_action(|workspace, _: &HotReload, _, cx| {
+                    if let Some(debug_panel) = workspace.panel::<DebugPanel>(cx) {
+                        if let Some(active_item) = debug_panel.read_with(cx, |panel, cx| {
+                            panel
+                                .active_session()
+                                .map(|session| session.read(cx).running_state().clone())
+                        }) {
+                            active_item.update(cx, |item, cx| item.hot_reload(cx))
+                        }
+                    }
                 });
         })
     })
