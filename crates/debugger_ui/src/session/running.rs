@@ -1528,6 +1528,12 @@ impl RunningState {
         });
     }
 
+    pub fn hot_reload(&mut self, cx: &mut Context<Self>) {
+        self.session().update(cx, |state, cx| {
+            state.hot_reload(cx).detach();
+        });
+    }
+
     fn default_pane_layout(
         project: Entity<Project>,
         workspace: &WeakEntity<Workspace>,

@@ -34,7 +34,7 @@ use gpui::{
     Task, WeakEntity,
 };
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use smol::stream::StreamExt;
 use std::any::TypeId;
 use std::collections::BTreeMap;
@@ -871,6 +871,10 @@ impl Session {
 
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    pub fn adapter_name(&self) -> &DebugAdapterName {
+        &self.adapter
     }
 
     pub fn binary(&self) -> &DebugAdapterBinary {
@@ -2174,6 +2178,69 @@ impl Session {
         };
 
         self.request(command, Self::empty_response, cx).detach()
+    }
+
+    pub fn hot_reload(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        // Check if we're running a Flutter/Dart session
+        if self.adapter.0 != "Dart" {
+            return Task::ready(());
+        }
+
+        // Get the client from the running mode
+        let Mode::Running(ref mode) = self.mode else {
+            return Task::ready(());
+        };
+
+        // Flutter debug adapter expects a custom "hotReload" request
+        // We'll send it as a raw DAP message
+        let client = mode.client.clone();
+        let sequence_id = client.next_sequence_id();
+        let request = dap::messages::Request {
+            seq: sequence_id,
+            command: "hotReload".to_string(),
+            arguments: Some(json!({
+                "reason": "manual"
+            })),
+        };
+        
+        cx.spawn(async move |this, cx| {
+            let result = client.send_message(dap::messages::Message::Request(request)).await;
+            
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        let event = dap::OutputEvent {
+                            category: None,
+                            output: "Hot reload initiated".to_string(),
+                            group: None,
+                            variables_reference: None,
+                            source: None,
+                            line: None,
+                            column: None,
+                            data: None,
+                            location_reference: None,
+                        };
+                        this.push_output(event, cx);
+                    }
+                    Err(e) => {
+                        let event = dap::OutputEvent {
+                            category: None,
+                            output: format!("Hot reload failed: {}", e),
+                            group: None,
+                            variables_reference: None,
+                            source: None,
+                            line: None,
+                            column: None,
+                            data: None,
+                            location_reference: None,
+                        };
+                        this.push_output(event, cx);
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
     }
 
     pub fn terminate_threads(&mut self, thread_ids: Option<Vec<ThreadId>>, cx: &mut Context<Self>) {
