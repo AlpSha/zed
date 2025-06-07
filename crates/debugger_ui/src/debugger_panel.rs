@@ -730,12 +730,10 @@ impl DebugPanel {
                                             }),
                                     )
                                     .when({
-                                        let adapter_name = active_session
+                                        active_session
                                             .as_ref()
-                                            .map(|session| session.read(cx).adapter_name())
-                                            .map(|name| name.0.as_str())
-                                            .unwrap_or("");
-                                        adapter_name == "Dart"
+                                            .map(|session| session.read(cx).adapter_name(cx).0 == "Dart")
+                                            .unwrap_or(false)
                                     }, |this| {
                                         this.child(
                                             IconButton::new("debug-hot-reload", IconName::RotateCw)

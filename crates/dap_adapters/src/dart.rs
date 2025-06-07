@@ -329,8 +329,7 @@ impl DartDebugAdapter {
 
             for arg in tool_args {
                 if let Some(arg_str) = arg.as_str() {
-                    if arg_str.starts_with("--dart-define-from-file=") {
-                        let file_path = &arg_str[24..];
+                    if let Some(file_path) = arg_str.strip_prefix("--dart-define-from-file=") {
                         let full_path = if std::path::Path::new(file_path).is_relative() {
                             delegate.worktree_root_path().join(file_path)
                         } else {
