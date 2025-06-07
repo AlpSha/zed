@@ -120,7 +120,7 @@ impl DebugAdapter for DartDebugAdapter {
         })
     }
 
-    fn validate_config(
+    fn request_kind(
         &self,
         config: &serde_json::Value,
     ) -> Result<StartDebuggingRequestArgumentsRequest> {
@@ -269,7 +269,7 @@ impl DebugAdapter for DartDebugAdapter {
             .await?;
 
         let dap_request_args = StartDebuggingRequestArguments {
-            request: self.validate_config(&processed_config)?,
+            request: self.request_kind(&processed_config)?,
             configuration: processed_config,
         };
 
