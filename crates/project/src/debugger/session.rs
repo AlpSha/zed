@@ -2165,9 +2165,9 @@ impl Session {
         }
 
         // Flutter/Dart debug adapter supports hot reload through evaluate request
-        // with a special expression "$hotReload"
+        // with a special expression "hotReload" (for reload) in the REPL context
         self.evaluate(
-            "$hotReload".to_string(),
+            "hotReload".to_string(),
             Some(EvaluateArgumentsContext::Repl),
             None,
             None,
