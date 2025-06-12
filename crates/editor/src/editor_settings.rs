@@ -50,6 +50,7 @@ pub struct EditorSettings {
     pub diagnostics_max_severity: Option<DiagnosticSeverity>,
     pub inline_code_actions: bool,
     pub drag_and_drop_selection: bool,
+    pub save_non_dirty_buffers: bool,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -150,6 +151,7 @@ impl Minimap {
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Gutter {
+    pub min_line_number_digits: usize,
     pub line_numbers: bool,
     pub runnables: bool,
     pub breakpoints: bool,
@@ -501,6 +503,12 @@ pub struct EditorSettingsContent {
     ///
     /// Default: true
     pub drag_and_drop_selection: Option<bool>,
+
+    /// Whether to save singleton buffers that are not dirty.
+    /// This will "touch" the file and related tools enabled, e.g. formatters.
+    ///
+    /// Default: true
+    pub save_non_dirty_buffers: Option<bool>,
 }
 
 // Toolbar related settings
@@ -609,6 +617,10 @@ pub struct GutterContent {
     ///
     /// Default: true
     pub line_numbers: Option<bool>,
+    /// Minimum number of characters to reserve space for in the gutter.
+    ///
+    /// Default: 4
+    pub min_line_number_digits: Option<usize>,
     /// Whether to show runnable buttons in the gutter.
     ///
     /// Default: true
