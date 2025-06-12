@@ -3,9 +3,9 @@ use crate::session::DebugSession;
 use crate::session::running::RunningState;
 use crate::{
     ClearAllBreakpoints, Continue, Detach, FocusBreakpointList, FocusConsole, FocusFrames,
-    FocusLoadedSources, FocusModules, FocusTerminal, FocusVariables, HotReload, NewProcessModal,
-    NewProcessMode, Pause, Restart, ShowStackTrace, StepBack, StepInto, StepOut, StepOver, Stop,
-    ToggleExpandItem, ToggleIgnoreBreakpoints, ToggleSessionPicker, ToggleThreadPicker,
+    FocusLoadedSources, FocusModules, FocusTerminal, FocusVariables, NewProcessModal,
+    NewProcessMode, Pause, Restart, StepInto, StepOut, StepOver, Stop,
+    ToggleExpandItem, ToggleSessionPicker, ToggleThreadPicker,
     persistence, spawn_task_or_modal,
 };
 use anyhow::Result;

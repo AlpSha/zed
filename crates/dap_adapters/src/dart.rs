@@ -292,7 +292,7 @@ impl DebugAdapter for DartDebugAdapter {
         }
 
         Ok(DebugAdapterBinary {
-            command: executable,
+            command: Some(executable),
             arguments: adapter_args,
             cwd,
             envs,
