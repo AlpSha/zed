@@ -30,7 +30,7 @@ impl DebugAdapter for DartDebugAdapter {
         Some(LanguageName::new("Dart"))
     }
 
-    async fn dap_schema(&self) -> serde_json::Value {
+    fn dap_schema(&self) -> serde_json::Value {
         json!({
             "properties": {
                 "request": {
