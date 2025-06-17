@@ -120,7 +120,7 @@ impl DebugAdapter for DartDebugAdapter {
         })
     }
 
-    fn request_kind(
+    async fn request_kind(
         &self,
         config: &serde_json::Value,
     ) -> Result<StartDebuggingRequestArgumentsRequest> {
@@ -160,7 +160,7 @@ impl DebugAdapter for DartDebugAdapter {
         }
     }
 
-    fn config_from_zed_format(&self, zed_scenario: ZedDebugConfig) -> Result<DebugScenario> {
+    async fn config_from_zed_format(&self, zed_scenario: ZedDebugConfig) -> Result<DebugScenario> {
         let mut config = serde_json::Map::new();
 
         config.insert(
@@ -269,7 +269,7 @@ impl DebugAdapter for DartDebugAdapter {
             .await?;
 
         let dap_request_args = StartDebuggingRequestArguments {
-            request: self.request_kind(&processed_config)?,
+            request: self.request_kind(&processed_config).await?,
             configuration: processed_config,
         };
 
