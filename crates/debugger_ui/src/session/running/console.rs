@@ -151,24 +151,32 @@ impl Console {
         }
 
         let len = self.ansi_handler.pos;
+        // Reset the handler's output buffer and span tracking for this chunk
+        self.ansi_handler.output.clear();
+        self.ansi_handler.spans.clear();
+        self.ansi_handler.background_spans.clear();
+        self.ansi_handler.current_range_start = 0;
+        self.ansi_handler.current_background_range_start = 0;
+        
         self.ansi_processor
             .advance(&mut self.ansi_handler, to_insert.as_bytes());
         let output = std::mem::take(&mut self.ansi_handler.output);
         let mut spans = std::mem::take(&mut self.ansi_handler.spans);
         let mut background_spans = std::mem::take(&mut self.ansi_handler.background_spans);
-        if self.ansi_handler.current_range_start < len + output.len() {
+        
+        // Update the position counter after processing
+        self.ansi_handler.pos = len + output.len();
+        if self.ansi_handler.current_range_start < output.len() {
             spans.push((
-                self.ansi_handler.current_range_start..len + output.len(),
+                self.ansi_handler.current_range_start..output.len(),
                 self.ansi_handler.current_color,
             ));
-            self.ansi_handler.current_range_start = len + output.len();
         }
-        if self.ansi_handler.current_background_range_start < len + output.len() {
+        if self.ansi_handler.current_background_range_start < output.len() {
             background_spans.push((
-                self.ansi_handler.current_background_range_start..len + output.len(),
+                self.ansi_handler.current_background_range_start..output.len(),
                 self.ansi_handler.current_background_color,
             ));
-            self.ansi_handler.current_background_range_start = len + output.len();
         }
 
         self.console.update(cx, |console, cx| {
@@ -185,8 +193,19 @@ impl Console {
             for (range, color) in spans {
                 let Some(color) = color else { continue };
                 let start = range.start + len;
-                let range = start..range.end + len;
-                let range = buffer.anchor_after(range.start)..buffer.anchor_before(range.end);
+                let end = range.end + len;
+                
+                // Ensure the range is within bounds
+                let buffer_len = buffer.len();
+                if start > buffer_len || end > buffer_len {
+                    log::warn!(
+                        "Skipping ANSI highlight range {}..{} as it exceeds buffer length {}",
+                        start, end, buffer_len
+                    );
+                    continue;
+                }
+                
+                let range = buffer.anchor_after(start)..buffer.anchor_before(end);
                 let style = HighlightStyle {
                     color: Some(terminal_view::terminal_element::convert_color(
                         &color,
@@ -204,8 +223,19 @@ impl Console {
             for (range, color) in background_spans {
                 let Some(color) = color else { continue };
                 let start = range.start + len;
-                let range = start..range.end + len;
-                let range = buffer.anchor_after(range.start)..buffer.anchor_before(range.end);
+                let end = range.end + len;
+                
+                // Ensure the range is within bounds
+                let buffer_len = buffer.len();
+                if start > buffer_len || end > buffer_len {
+                    log::warn!(
+                        "Skipping ANSI background range {}..{} as it exceeds buffer length {}",
+                        start, end, buffer_len
+                    );
+                    continue;
+                }
+                
+                let range = buffer.anchor_after(start)..buffer.anchor_before(end);
 
                 let color_fetcher: fn(&Theme) -> Hsla = match color {
                     // Named and theme defined colors
@@ -655,7 +685,7 @@ impl ConsoleHandler {
             self.current_color,
         ));
         self.current_color = color;
-        self.current_range_start = self.pos;
+        self.current_range_start = self.output.len();
     }
 
     fn break_background_span(&mut self, color: Option<ansi::Color>) {
@@ -664,14 +694,14 @@ impl ConsoleHandler {
             self.current_background_color,
         ));
         self.current_background_color = color;
-        self.current_background_range_start = self.pos;
+        self.current_background_range_start = self.output.len();
     }
 }
 
 impl ansi::Handler for ConsoleHandler {
     fn input(&mut self, c: char) {
         self.output.push(c);
-        self.pos += 1;
+        self.pos += c.len_utf8();
     }
 
     fn linefeed(&mut self) {
