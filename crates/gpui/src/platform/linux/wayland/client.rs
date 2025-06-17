@@ -537,7 +537,7 @@ impl WaylandClient {
                     XDPEvent::CursorTheme(theme) => {
                         if let Some(client) = client.0.upgrade() {
                             let mut client = client.borrow_mut();
-                            client.cursor.set_theme(theme.as_str());
+                            client.cursor.set_theme(theme);
                         }
                     }
                     XDPEvent::CursorSize(size) => {
@@ -730,7 +730,7 @@ impl LinuxClient for WaylandClient {
                 let scale = focused_window.primary_output_scale();
                 state
                     .cursor
-                    .set_icon(&wl_pointer, serial, style.to_icon_name(), scale);
+                    .set_icon(&wl_pointer, serial, style.to_icon_names(), scale);
             }
         }
     }
@@ -1252,12 +1252,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 keymap_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
                 state.modifiers = Modifiers::from_xkb(keymap_state);
 
-                if let Some(focused_window) = focused_window {
-                    let input = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
-                        modifiers: state.modifiers,
-                    });
+                let input = PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                    modifiers: state.modifiers,
+                });
+                drop(state);
 
-                    drop(state);
+                if let Some(focused_window) = focused_window {
                     focused_window.handle_input(input);
                 }
 
@@ -1530,9 +1530,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                             cursor_shape_device.set_shape(serial, style.to_shape());
                         } else {
                             let scale = window.primary_output_scale();
-                            state
-                                .cursor
-                                .set_icon(&wl_pointer, serial, style.to_icon_name(), scale);
+                            state.cursor.set_icon(
+                                &wl_pointer,
+                                serial,
+                                style.to_icon_names(),
+                                scale,
+                            );
                         }
                     }
                     drop(state);
