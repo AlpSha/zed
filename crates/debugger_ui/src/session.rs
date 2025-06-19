@@ -134,7 +134,7 @@ impl DebugSession {
             .clone()
     }
 
-    pub(crate) fn label_element(&self, cx: &App) -> AnyElement {
+    pub(crate) fn label_element(&self, depth: usize, cx: &App) -> AnyElement {
         let label = self.label(cx);
 
         let is_terminated = self
@@ -162,6 +162,7 @@ impl DebugSession {
         };
 
         h_flex()
+            .ml(depth * px(16.0))
             .gap_2()
             .when_some(icon, |this, indicator| this.child(indicator))
             .justify_between()
