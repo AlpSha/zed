@@ -208,6 +208,7 @@ impl DebugAdapter for DartDebugAdapter {
         delegate: &Arc<dyn DapDelegate>,
         task_definition: &DebugTaskDefinition,
         _user_installed_path: Option<PathBuf>,
+        _extra_args: Option<Vec<String>>,
         _cx: &mut AsyncApp,
     ) -> Result<DebugAdapterBinary> {
         let is_flutter_project = self.is_flutter_project(delegate).await;
