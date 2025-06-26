@@ -42,7 +42,8 @@
       "ctrl-r": "debugger::HotReload",
       "f11": "zed::ToggleFullScreen",
       "ctrl-alt-z": "edit_prediction::RateCompletions",
-      "ctrl-shift-i": "edit_prediction::ToggleMenu"
+      "ctrl-shift-i": "edit_prediction::ToggleMenu",
+      "ctrl-alt-l": "lsp_tool::ToggleMenu"
     }
   },
   {
@@ -244,8 +245,7 @@
       "ctrl-alt-e": "agent::RemoveAllContext",
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-shift-enter": "agent::ContinueThread",
-      "alt-enter": "agent::ContinueWithBurnMode",
-      "ctrl-alt-b": "agent::ToggleBurnMode"
+      "alt-enter": "agent::ContinueWithBurnMode"
     }
   },
   {
