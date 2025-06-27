@@ -3898,11 +3898,11 @@ impl Editor {
                             bracket_pair_matching_end = Some(pair.clone());
                         }
                     }
-                    if let Some(end) = bracket_pair_matching_end
-                        && bracket_pair.is_none()
-                    {
-                        bracket_pair = Some(end);
-                        is_bracket_pair_end = true;
+                    if let Some(end) = bracket_pair_matching_end {
+                        if bracket_pair.is_none() {
+                            bracket_pair = Some(end);
+                            is_bracket_pair_end = true;
+                        }
                     }
                 }
 
