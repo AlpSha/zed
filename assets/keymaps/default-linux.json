@@ -245,6 +245,7 @@
       "ctrl-alt-e": "agent::RemoveAllContext",
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-shift-enter": "agent::ContinueThread",
+      "super-ctrl-b": "agent::ToggleBurnMode",
       "alt-enter": "agent::ContinueWithBurnMode"
     }
   },
