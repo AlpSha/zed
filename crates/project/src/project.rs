@@ -131,7 +131,8 @@ pub use language::Location;
 #[cfg(any(test, feature = "test-support"))]
 pub use prettier::FORMAT_SUFFIX as TEST_PRETTIER_FORMAT_SUFFIX;
 pub use task_inventory::{
-    BasicContextProvider, ContextProviderWithTasks, Inventory, TaskContexts, TaskSourceKind,
+    BasicContextProvider, ContextProviderWithTasks, DebugScenarioContext, Inventory, TaskContexts,
+    TaskSourceKind,
 };
 
 pub use buffer_store::ProjectTransaction;
@@ -2972,6 +2973,20 @@ impl Project {
                 }
                 Ok(path) => cx.emit(Event::HideToast {
                     notification_id: format!("local-tasks-{path:?}").into(),
+                }),
+                Err(_) => {}
+            },
+            SettingsObserverEvent::LocalDebugScenariosUpdated(result) => match result {
+                Err(InvalidSettingsError::Debug { message, path }) => {
+                    let message =
+                        format!("Failed to set local debug scenarios in {path:?}:\n{message}");
+                    cx.emit(Event::Toast {
+                        notification_id: format!("local-debug-scenarios-{path:?}").into(),
+                        message,
+                    });
+                }
+                Ok(path) => cx.emit(Event::HideToast {
+                    notification_id: format!("local-debug-scenarios-{path:?}").into(),
                 }),
                 Err(_) => {}
             },

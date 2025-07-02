@@ -34,7 +34,7 @@
       "ctrl-q": "zed::Quit",
       "f4": "debugger::Start",
       "shift-f5": "debugger::Stop",
-      "ctrl-shift-f5": "debugger::Restart",
+      "ctrl-shift-f5": "debugger::RerunSession",
       "f6": "debugger::Pause",
       "f7": "debugger::StepOver",
       "ctrl-f11": "debugger::StepInto",
@@ -599,7 +599,7 @@
       // "foo-bar": ["task::Spawn", { "task_name": "MyTask", "reveal_target": "dock" }]
       // or by tag:
       // "foo-bar": ["task::Spawn", { "task_tag": "MyTag" }],
-      "f5": "debugger::RerunLastSession"
+      "f5": "debugger::Rerun"
     }
   },
   {
@@ -1067,6 +1067,13 @@
     "bindings": {
       "ctrl-tab": "pane::ActivateNextItem",
       "ctrl-shift-tab": "pane::ActivatePreviousItem"
+    }
+  },
+  {
+    "context": "KeymapEditor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-f": "search::FocusSearch"
     }
   }
 ]
