@@ -558,6 +558,13 @@
       "ctrl-b": "workspace::ToggleLeftDock",
       "ctrl-j": "workspace::ToggleBottomDock",
       "ctrl-alt-y": "workspace::CloseAllDocks",
+      "ctrl-alt-0": "workspace::ResetActiveDockSize",
+      // For 0px parameter, uses UI font size value.
+      "ctrl-alt--": ["workspace::DecreaseActiveDockSize", { "px": 0 }],
+      "ctrl-alt-=": ["workspace::IncreaseActiveDockSize", { "px": 0 }],
+      "ctrl-alt-)": "workspace::ResetOpenDocksSize",
+      "ctrl-alt-_": ["workspace::DecreaseOpenDocksSize", { "px": 0 }],
+      "ctrl-alt-+": ["workspace::IncreaseOpenDocksSize", { "px": 0 }],
       "shift-find": "pane::DeploySearch",
       "ctrl-shift-f": "pane::DeploySearch",
       "ctrl-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
@@ -599,7 +606,9 @@
       // "foo-bar": ["task::Spawn", { "task_name": "MyTask", "reveal_target": "dock" }]
       // or by tag:
       // "foo-bar": ["task::Spawn", { "task_tag": "MyTag" }],
-      "f5": "debugger::Rerun"
+      "f5": "debugger::Rerun",
+      "ctrl-f4": "workspace::CloseActiveDock",
+      "ctrl-w": "workspace::CloseActiveDock"
     }
   },
   {
@@ -700,6 +709,13 @@
       "down": "editor::ContextMenuNext",
       "pageup": "editor::ContextMenuFirst",
       "pagedown": "editor::ContextMenuLast"
+    }
+  },
+  {
+    "context": "Editor && showing_signature_help && !showing_completions",
+    "bindings": {
+      "up": "editor::SignatureHelpPrevious",
+      "down": "editor::SignatureHelpNext"
     }
   },
   // Custom bindings
@@ -1067,6 +1083,13 @@
     "bindings": {
       "ctrl-tab": "pane::ActivateNextItem",
       "ctrl-shift-tab": "pane::ActivatePreviousItem"
+    }
+  },
+  {
+    "context": "MarkdownPreview",
+    "bindings": {
+      "pageup": "markdown::MovePageUp",
+      "pagedown": "markdown::MovePageDown"
     }
   },
   {
