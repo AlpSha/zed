@@ -2476,7 +2476,7 @@ impl Session {
                             data: None,
                             location_reference: None,
                         };
-                        this.push_output(event, cx);
+                        this.push_output(event);
                     }
                     Err(e) => {
                         let event = dap::OutputEvent {
@@ -2490,7 +2490,7 @@ impl Session {
                             data: None,
                             location_reference: None,
                         };
-                        this.push_output(event, cx);
+                        this.push_output(event);
                     }
                 };
                 cx.notify();
