@@ -2,9 +2,11 @@
 resolver = "2"
 members = [
     "crates/activity_indicator",
+    "crates/acp",
     "crates/agent_ui",
     "crates/agent",
     "crates/agent_settings",
+    "crates/agent_servers",
     "crates/anthropic",
     "crates/askpass",
     "crates/assets",
@@ -216,10 +218,12 @@ edition = "2024"
 # Workspace member crates
 #
 
-activity_indicator = { path = "crates/activity_indicator" }
+acp = { path = "crates/acp" }
 agent = { path = "crates/agent" }
+activity_indicator = { path = "crates/activity_indicator" }
 agent_ui = { path = "crates/agent_ui" }
 agent_settings = { path = "crates/agent_settings" }
+agent_servers = { path = "crates/agent_servers" }
 ai = { path = "crates/ai" }
 anthropic = { path = "crates/anthropic" }
 askpass = { path = "crates/askpass" }
@@ -400,6 +404,7 @@ zlog_settings = { path = "crates/zlog_settings" }
 # External crates
 #
 
+agentic-coding-protocol = "0.0.6"
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty.git", branch = "add-hush-login-flag" }
 any_vec = "0.14"
@@ -541,7 +546,7 @@ rustc-demangle = "0.1.23"
 rustc-hash = "2.1.0"
 rustls = { version = "0.23.26" }
 rustls-platform-verifier = "0.5.0"
-scap = { git = "https://github.com/zed-industries/scap", rev = "08f0a01417505cc0990b9931a37e5120db92e0d0", default-features = false }
+scap = { git = "https://github.com/zed-industries/scap", rev = "28dd306ff2e3374404936dec778fc1e975b8dd12", default-features = false }
 schemars = { version = "1.0", features = ["indexmap2"] }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive", "rc"] }

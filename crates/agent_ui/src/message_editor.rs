@@ -47,13 +47,14 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{CollaboratorId, Workspace};
+use zed_actions::agent::Chat;
 use zed_llm_client::CompletionIntent;
 
 use crate::context_picker::{ContextPicker, ContextPickerCompletionProvider, crease_for_mention};
 use crate::context_strip::{ContextStrip, ContextStripEvent, SuggestContextKind};
 use crate::profile_selector::ProfileSelector;
 use crate::{
-    ActiveThread, AgentDiffPane, Chat, ChatWithFollow, ExpandMessageEditor, Follow, KeepAll,
+    ActiveThread, AgentDiffPane, ChatWithFollow, ExpandMessageEditor, Follow, KeepAll,
     ModelUsageContext, NewThread, OpenAgentDiff, RejectAll, RemoveAllContext, ToggleBurnMode,
     ToggleContextPicker, ToggleProfileSelector, register_agent_preview,
 };
@@ -1453,6 +1454,7 @@ impl MessageEditor {
                         tool_choice: None,
                         stop: vec![],
                         temperature: AgentSettings::temperature_for_model(&model.model, cx),
+                        thinking_allowed: true,
                     };
 
                     Some(model.model.count_tokens(request, cx))
@@ -1620,6 +1622,7 @@ impl Render for MessageEditor {
 
         v_flex()
             .size_full()
+            .bg(cx.theme().colors().panel_background)
             .when(changed_buffers.len() > 0, |parent| {
                 parent.child(self.render_edits_bar(&changed_buffers, window, cx))
             })
