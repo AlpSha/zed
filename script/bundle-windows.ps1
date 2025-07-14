@@ -56,6 +56,13 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
 }
 
+function GenerateLicenses {
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    . $PSScriptRoot/generate-licenses.ps1
+    $ErrorActionPreference = $oldErrorActionPreference
+}
+
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto_update_helper.exe
@@ -167,7 +174,7 @@ function BuildInstaller {
         }
         "dev" {
             $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
-            $appIconName = "app-icon-nightly"
+            $appIconName = "app-icon-dev"
             $appName = "Zed Dev"
             $appDisplayName = "Zed Dev"
             $appSetupName = "ZedEditorUserSetup-x64-$env:RELEASE_VERSION-dev"
@@ -238,6 +245,7 @@ $innoDir = "$env:ZED_WORKSPACE\inno"
 
 CheckEnvironmentVariables
 PrepareForBundle
+GenerateLicenses
 BuildZedAndItsFriends
 MakeAppx
 SignZedAndItsFriends
