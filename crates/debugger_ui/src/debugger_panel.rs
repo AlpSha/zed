@@ -835,7 +835,11 @@ impl DebugPanel {
                                     .when({
                                         active_session
                                             .as_ref()
-                                            .map(|session| session.read(cx).adapter_name(cx).0 == "Dart")
+                                            .map(|session| {
+                                                let debug_session = session.read(cx);
+                                                let session = debug_session.session(cx);
+                                                session.read(cx).adapter_name().0 == "Dart"
+                                            })
                                             .unwrap_or(false)
                                     }, |this| {
                                         this.child(
