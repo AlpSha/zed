@@ -824,41 +824,13 @@ impl crate::Keystroke {
             Keysym::plus => "+".to_owned(),
 
             _ => {
-                // First check if we have a valid single ASCII character from the current layout
-                if key_utf8.len() == 1 {
-                    if let Some(ch) = key_utf8.chars().next() {
-                        if ch.is_ascii() && !ch.is_ascii_control() {
-                            // Use the actual character from the current keyboard layout
-                            // For shift+letter combinations, use lowercase to match vim bindings
-                            if modifiers.shift && ch.is_ascii_alphabetic() {
-                                ch.to_lowercase().to_string()
-                            } else {
-                                key_utf8.clone()
-                            }
-                        } else if let Some(key_en) = guess_ascii(keycode, modifiers.shift) {
-                            // Fall back to QWERTY mapping for non-ASCII layouts
-                            String::from(key_en)
-                        } else {
-                            let name = xkb::keysym_get_name(key_sym).to_lowercase();
-                            if key_sym.is_keypad_key() {
-                                name.replace("kp_", "")
-                            } else {
-                                name
-                            }
-                        }
-                    } else {
-                        xkb::keysym_get_name(key_sym).to_lowercase()
-                    }
+                let name = xkb::keysym_get_name(key_sym).to_lowercase();
+                if key_sym.is_keypad_key() {
+                    name.replace("kp_", "")
                 } else if let Some(key_en) = guess_ascii(keycode, modifiers.shift) {
-                    // For multi-byte or empty strings, try QWERTY mapping
                     String::from(key_en)
                 } else {
-                    let name = xkb::keysym_get_name(key_sym).to_lowercase();
-                    if key_sym.is_keypad_key() {
-                        name.replace("kp_", "")
-                    } else {
-                        name
-                    }
+                    name
                 }
             }
         };
