@@ -1791,7 +1791,7 @@ impl Session {
         frame_id: Option<u64>,
         expression: String,
         cx: &mut Context<Self>,
-    ) -> Task<Option<String>> {
+    ) -> Task<Option<(String, Option<String>)>> {
         let request = self.request(
             EvaluateCommand {
                 expression,
@@ -1805,7 +1805,9 @@ impl Session {
         );
         cx.background_spawn(async move {
             let result = request.await?;
-            result.memory_reference
+            result
+                .memory_reference
+                .map(|reference| (reference, result.type_))
         })
     }
 

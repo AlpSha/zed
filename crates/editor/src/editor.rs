@@ -134,7 +134,7 @@ use project::{
         session::{Session, SessionEvent},
     },
     git_store::{GitStoreEvent, RepositoryEvent},
-    project_settings::DiagnosticSeverity,
+    project_settings::{DiagnosticSeverity, GoToDiagnosticSeverityFilter},
 };
 
 pub use git::blame::BlameRenderer;
@@ -356,6 +356,7 @@ pub fn init(cx: &mut App) {
             workspace.register_action(Editor::new_file_vertical);
             workspace.register_action(Editor::new_file_horizontal);
             workspace.register_action(Editor::cancel_language_server_work);
+            workspace.register_action(Editor::toggle_focus);
         },
     )
     .detach();
@@ -482,9 +483,7 @@ pub enum SelectMode {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum EditorMode {
-    SingleLine {
-        auto_width: bool,
-    },
+    SingleLine,
     AutoHeight {
         min_lines: usize,
         max_lines: Option<usize>,
@@ -1662,31 +1661,13 @@ impl Editor {
     pub fn single_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let buffer = cx.new(|cx| Buffer::local("", cx));
         let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
-        Self::new(
-            EditorMode::SingleLine { auto_width: false },
-            buffer,
-            None,
-            window,
-            cx,
-        )
+        Self::new(EditorMode::SingleLine, buffer, None, window, cx)
     }
 
     pub fn multi_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let buffer = cx.new(|cx| Buffer::local("", cx));
         let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
         Self::new(EditorMode::full(), buffer, None, window, cx)
-    }
-
-    pub fn auto_width(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let buffer = cx.new(|cx| Buffer::local("", cx));
-        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
-        Self::new(
-            EditorMode::SingleLine { auto_width: true },
-            buffer,
-            None,
-            window,
-            cx,
-        )
     }
 
     pub fn auto_height(
@@ -15086,7 +15067,7 @@ impl Editor {
 
     pub fn go_to_diagnostic(
         &mut self,
-        _: &GoToDiagnostic,
+        action: &GoToDiagnostic,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -15094,12 +15075,12 @@ impl Editor {
             return;
         }
         self.hide_mouse_cursor(HideMouseCursorOrigin::MovementAction, cx);
-        self.go_to_diagnostic_impl(Direction::Next, window, cx)
+        self.go_to_diagnostic_impl(Direction::Next, action.severity, window, cx)
     }
 
     pub fn go_to_prev_diagnostic(
         &mut self,
-        _: &GoToPreviousDiagnostic,
+        action: &GoToPreviousDiagnostic,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -15107,12 +15088,13 @@ impl Editor {
             return;
         }
         self.hide_mouse_cursor(HideMouseCursorOrigin::MovementAction, cx);
-        self.go_to_diagnostic_impl(Direction::Prev, window, cx)
+        self.go_to_diagnostic_impl(Direction::Prev, action.severity, window, cx)
     }
 
     pub fn go_to_diagnostic_impl(
         &mut self,
         direction: Direction,
+        severity: GoToDiagnosticSeverityFilter,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -15128,9 +15110,11 @@ impl Editor {
 
         fn filtered(
             snapshot: EditorSnapshot,
+            severity: GoToDiagnosticSeverityFilter,
             diagnostics: impl Iterator<Item = DiagnosticEntry<usize>>,
         ) -> impl Iterator<Item = DiagnosticEntry<usize>> {
             diagnostics
+                .filter(move |entry| severity.matches(entry.diagnostic.severity))
                 .filter(|entry| entry.range.start != entry.range.end)
                 .filter(|entry| !entry.diagnostic.is_unnecessary)
                 .filter(move |entry| !snapshot.intersects_fold(entry.range.start))
@@ -15139,12 +15123,14 @@ impl Editor {
         let snapshot = self.snapshot(window, cx);
         let before = filtered(
             snapshot.clone(),
+            severity,
             buffer
                 .diagnostics_in_range(0..selection.start)
                 .filter(|entry| entry.range.start <= selection.start),
         );
         let after = filtered(
             snapshot,
+            severity,
             buffer
                 .diagnostics_in_range(selection.start..buffer.len())
                 .filter(|entry| entry.range.start >= selection.start),
@@ -16967,6 +16953,18 @@ impl Editor {
         });
         self.request_autoscroll(Autoscroll::newest(), cx);
         cx.notify();
+    }
+
+    pub fn toggle_focus(
+        workspace: &mut Workspace,
+        _: &actions::ToggleFocus,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(item) = workspace.recent_active_item_by_type::<Self>(cx) else {
+            return;
+        };
+        workspace.activate_item(&item, true, true, window, cx);
     }
 
     pub fn toggle_fold(
@@ -20564,6 +20562,7 @@ impl Editor {
         if event.blurred != self.focus_handle {
             self.last_focused_descendant = Some(event.blurred);
         }
+        self.selection_drag_state = SelectionDragState::None;
         self.refresh_inlay_hints(InlayHintRefreshReason::ModifiersChanged(false), cx);
     }
 
