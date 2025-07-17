@@ -829,8 +829,8 @@ impl crate::Keystroke {
                     if let Some(ch) = key_utf8.chars().next() {
                         if ch.is_ascii() && !ch.is_ascii_control() {
                             // Use the actual character from the current keyboard layout
-                            // For shift+letter and ctrl+letter combinations, use lowercase to match vim bindings
-                            if (modifiers.shift || modifiers.control) && ch.is_ascii_alphabetic() {
+                            // For shift+letter combinations, use lowercase to match vim bindings
+                            if modifiers.shift && ch.is_ascii_alphabetic() {
                                 ch.to_lowercase().to_string()
                             } else {
                                 key_utf8.clone()
