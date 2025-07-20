@@ -86,16 +86,13 @@ actions!(
         /// Toggles expansion of the selected item in the debugger UI.
         ToggleExpandItem,
         HotReload,
-        /// Set a data breakpoint on the selected variable or memory region.
-        ToggleDataBreakpoint,
     ]
 );
 
-/// Extends selection down by a specified number of lines.
+/// Set a data breakpoint on the selected variable or memory region.
 #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
 #[action(namespace = debugger)]
 #[serde(deny_unknown_fields)]
-/// Set a data breakpoint on the selected variable or memory region.
 pub struct ToggleDataBreakpoint {
     /// The type of data breakpoint
     /// Read & Write
