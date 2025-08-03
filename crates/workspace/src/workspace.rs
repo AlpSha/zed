@@ -15,7 +15,6 @@ mod toast_layer;
 mod toolbar;
 mod workspace_settings;
 
-use client::CloudUserStore;
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -840,7 +839,6 @@ pub struct AppState {
     pub languages: Arc<LanguageRegistry>,
     pub client: Arc<Client>,
     pub user_store: Entity<UserStore>,
-    pub cloud_user_store: Entity<CloudUserStore>,
     pub workspace_store: Entity<WorkspaceStore>,
     pub fs: Arc<dyn fs::Fs>,
     pub build_window_options: fn(Option<Uuid>, &mut App) -> WindowOptions,
@@ -913,7 +911,6 @@ impl AppState {
         let client = Client::new(clock, http_client.clone(), cx);
         let session = cx.new(|cx| AppSession::new(Session::test(), cx));
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
-        let cloud_user_store = cx.new(|cx| CloudUserStore::new(client.cloud_client(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
 
         theme::init(theme::LoadThemes::JustBase, cx);
@@ -925,7 +922,6 @@ impl AppState {
             fs,
             languages,
             user_store,
-            cloud_user_store,
             workspace_store,
             node_runtime: NodeRuntime::unavailable(),
             build_window_options: |_, _| Default::default(),
@@ -1094,7 +1090,8 @@ pub struct Workspace {
     _subscriptions: Vec<Subscription>,
     _apply_leader_updates: Task<Result<()>>,
     _observe_current_user: Task<Result<()>>,
-    _schedule_serialize: Option<Task<()>>,
+    _schedule_serialize_workspace: Option<Task<()>>,
+    _schedule_serialize_ssh_paths: Option<Task<()>>,
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
     pub centered_layout: bool,
@@ -1153,6 +1150,8 @@ impl Workspace {
 
                 project::Event::WorktreeRemoved(_) | project::Event::WorktreeAdded(_) => {
                     this.update_window_title(window, cx);
+                    this.update_ssh_paths(cx);
+                    this.serialize_ssh_paths(window, cx);
                     this.serialize_workspace(window, cx);
                     // This event could be triggered by `AddFolderToProject` or `RemoveFromProject`.
                     this.update_history(cx);
@@ -1420,7 +1419,8 @@ impl Workspace {
             app_state,
             _observe_current_user,
             _apply_leader_updates,
-            _schedule_serialize: None,
+            _schedule_serialize_workspace: None,
+            _schedule_serialize_ssh_paths: None,
             leader_updates_tx,
             _subscriptions: subscriptions,
             pane_history_timestamp,
@@ -5077,6 +5077,46 @@ impl Workspace {
         }
     }
 
+    fn update_ssh_paths(&mut self, cx: &App) {
+        let project = self.project().read(cx);
+        if !project.is_local() {
+            let paths: Vec<String> = project
+                .visible_worktrees(cx)
+                .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().to_string())
+                .collect();
+            if let Some(ssh_project) = &mut self.serialized_ssh_project {
+                ssh_project.paths = paths;
+            }
+        }
+    }
+
+    fn serialize_ssh_paths(&mut self, window: &mut Window, cx: &mut Context<Workspace>) {
+        if self._schedule_serialize_ssh_paths.is_none() {
+            self._schedule_serialize_ssh_paths =
+                Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(SERIALIZATION_THROTTLE_TIME)
+                        .await;
+                    this.update_in(cx, |this, window, cx| {
+                        let task = if let Some(ssh_project) = &this.serialized_ssh_project {
+                            let ssh_project_id = ssh_project.id;
+                            let ssh_project_paths = ssh_project.paths.clone();
+                            window.spawn(cx, async move |_| {
+                                persistence::DB
+                                    .update_ssh_project_paths(ssh_project_id, ssh_project_paths)
+                                    .await
+                            })
+                        } else {
+                            Task::ready(Err(anyhow::anyhow!("No SSH project to serialize")))
+                        };
+                        task.detach();
+                        this._schedule_serialize_ssh_paths.take();
+                    })
+                    .log_err();
+                }));
+        }
+    }
+
     fn remove_panes(&mut self, member: Member, window: &mut Window, cx: &mut Context<Workspace>) {
         match member {
             Member::Axis(PaneAxis { members, .. }) => {
@@ -5120,17 +5160,18 @@ impl Workspace {
     }
 
     fn serialize_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self._schedule_serialize.is_none() {
-            self._schedule_serialize = Some(cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                this.update_in(cx, |this, window, cx| {
-                    this.serialize_workspace_internal(window, cx).detach();
-                    this._schedule_serialize.take();
-                })
-                .log_err();
-            }));
+        if self._schedule_serialize_workspace.is_none() {
+            self._schedule_serialize_workspace =
+                Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(SERIALIZATION_THROTTLE_TIME)
+                        .await;
+                    this.update_in(cx, |this, window, cx| {
+                        this.serialize_workspace_internal(window, cx).detach();
+                        this._schedule_serialize_workspace.take();
+                    })
+                    .log_err();
+                }));
         }
     }
 
@@ -5693,15 +5734,12 @@ impl Workspace {
 
         let client = project.read(cx).client();
         let user_store = project.read(cx).user_store();
-        let cloud_user_store = cx.new(|cx| CloudUserStore::new(client.cloud_client(), cx));
-
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));
         let session = cx.new(|cx| AppSession::new(Session::test(), cx));
         window.activate_window();
         let app_state = Arc::new(AppState {
             languages: project.read(cx).languages().clone(),
             workspace_store,
-            cloud_user_store,
             client,
             user_store,
             fs: project.read(cx).fs().clone(),
@@ -6900,10 +6938,13 @@ async fn join_channel_internal(
         match status {
             Status::Connecting
             | Status::Authenticating
+            | Status::Authenticated
             | Status::Reconnecting
             | Status::Reauthenticating => continue,
             Status::Connected { .. } => break 'outer,
-            Status::SignedOut => return Err(ErrorCode::SignedOut.into()),
+            Status::SignedOut | Status::AuthenticationError => {
+                return Err(ErrorCode::SignedOut.into());
+            }
             Status::UpgradeRequired => return Err(ErrorCode::UpgradeRequired.into()),
             Status::ConnectionError | Status::ConnectionLost | Status::ReconnectionError { .. } => {
                 return Err(ErrorCode::Disconnected.into());
