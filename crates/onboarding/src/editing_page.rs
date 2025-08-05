@@ -9,10 +9,10 @@ use settings::{Settings as _, update_settings_file};
 use theme::{FontFamilyCache, FontFamilyName, ThemeSettings};
 use ui::{
     ButtonLike, ContextMenu, DropdownMenu, NumericStepper, SwitchField, ToggleButtonGroup,
-    ToggleButtonGroupStyle, ToggleButtonSimple, ToggleState, prelude::*,
+    ToggleButtonGroupStyle, ToggleButtonSimple, ToggleState, Tooltip, prelude::*,
 };
 
-use crate::{ImportCursorSettings, ImportVsCodeSettings};
+use crate::{ImportCursorSettings, ImportVsCodeSettings, SettingsImportState};
 
 fn read_show_mini_map(cx: &App) -> ShowMinimap {
     editor::EditorSettings::get_global(cx).minimap.show
@@ -165,7 +165,71 @@ fn write_format_on_save(format_on_save: bool, cx: &mut App) {
     });
 }
 
-fn render_import_settings_section() -> impl IntoElement {
+fn render_setting_import_button(
+    label: SharedString,
+    icon_name: IconName,
+    action: &dyn Action,
+    imported: bool,
+) -> impl IntoElement {
+    let action = action.boxed_clone();
+    h_flex().w_full().child(
+        ButtonLike::new(label.clone())
+            .full_width()
+            .style(ButtonStyle::Outlined)
+            .size(ButtonSize::Large)
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .px_1()
+                            .child(
+                                Icon::new(icon_name)
+                                    .color(Color::Muted)
+                                    .size(IconSize::XSmall),
+                            )
+                            .child(Label::new(label)),
+                    )
+                    .when(imported, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1p5()
+                                .child(
+                                    Icon::new(IconName::Check)
+                                        .color(Color::Success)
+                                        .size(IconSize::XSmall),
+                                )
+                                .child(Label::new("Imported").size(LabelSize::Small)),
+                        )
+                    }),
+            )
+            .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx)),
+    )
+}
+
+fn render_import_settings_section(cx: &App) -> impl IntoElement {
+    let import_state = SettingsImportState::global(cx);
+    let imports: [(SharedString, IconName, &dyn Action, bool); 2] = [
+        (
+            "VS Code".into(),
+            IconName::EditorVsCode,
+            &ImportVsCodeSettings { skip_prompt: false },
+            import_state.vscode,
+        ),
+        (
+            "Cursor".into(),
+            IconName::EditorCursor,
+            &ImportCursorSettings { skip_prompt: false },
+            import_state.cursor,
+        ),
+    ];
+
+    let [vscode, cursor] = imports.map(|(label, icon_name, action, imported)| {
+        render_setting_import_button(label, icon_name, action, imported)
+    });
+
     v_flex()
         .gap_4()
         .child(
@@ -176,63 +240,7 @@ fn render_import_settings_section() -> impl IntoElement {
                         .color(Color::Muted),
                 ),
         )
-        .child(
-            h_flex()
-                .w_full()
-                .gap_4()
-                .child(
-                    h_flex().w_full().child(
-                        ButtonLike::new("import_vs_code")
-                            .full_width()
-                            .style(ButtonStyle::Outlined)
-                            .size(ButtonSize::Large)
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_1p5()
-                                    .px_1()
-                                    .child(
-                                        Icon::new(IconName::EditorVsCode)
-                                            .color(Color::Muted)
-                                            .size(IconSize::XSmall),
-                                    )
-                                    .child(Label::new("VS Code")),
-                            )
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    ImportVsCodeSettings::default().boxed_clone(),
-                                    cx,
-                                )
-                            }),
-                    ),
-                )
-                .child(
-                    h_flex().w_full().child(
-                        ButtonLike::new("import_cursor")
-                            .full_width()
-                            .style(ButtonStyle::Outlined)
-                            .size(ButtonSize::Large)
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_1p5()
-                                    .px_1()
-                                    .child(
-                                        Icon::new(IconName::EditorCursor)
-                                            .color(Color::Muted)
-                                            .size(IconSize::XSmall),
-                                    )
-                                    .child(Label::new("Cursor")),
-                            )
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(
-                                    ImportCursorSettings::default().boxed_clone(),
-                                    cx,
-                                )
-                            }),
-                    ),
-                ),
-        )
+        .child(h_flex().w_full().gap_4().child(vscode).child(cursor))
 }
 
 fn render_font_customization_section(window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -357,23 +365,28 @@ fn render_font_customization_section(window: &mut Window, cx: &mut App) -> impl 
 }
 
 fn render_popular_settings_section(window: &mut Window, cx: &mut App) -> impl IntoElement {
+    const LIGATURE_TOOLTIP: &'static str = "Ligatures are when a font creates a special character out of combining two characters into one. For example, with ligatures turned on, =/= would become ≠.";
+
     v_flex()
         .gap_5()
         .child(Label::new("Popular Settings").size(LabelSize::Large).mt_8())
         .child(render_font_customization_section(window, cx))
-        .child(SwitchField::new(
-            "onboarding-font-ligatures",
-            "Font Ligatures",
-            Some("Combine text characters into their associated symbols.".into()),
-            if read_font_ligatures(cx) {
-                ui::ToggleState::Selected
-            } else {
-                ui::ToggleState::Unselected
-            },
-            |toggle_state, _, cx| {
-                write_font_ligatures(toggle_state == &ToggleState::Selected, cx);
-            },
-        ))
+        .child(
+            SwitchField::new(
+                "onboarding-font-ligatures",
+                "Font Ligatures",
+                Some("Combine text characters into their associated symbols.".into()),
+                if read_font_ligatures(cx) {
+                    ui::ToggleState::Selected
+                } else {
+                    ui::ToggleState::Unselected
+                },
+                |toggle_state, _, cx| {
+                    write_font_ligatures(toggle_state == &ToggleState::Selected, cx);
+                },
+            )
+            .tooltip(Tooltip::text(LIGATURE_TOOLTIP)),
+        )
         .child(SwitchField::new(
             "onboarding-format-on-save",
             "Format on Save",
@@ -385,6 +398,32 @@ fn render_popular_settings_section(window: &mut Window, cx: &mut App) -> impl In
             },
             |toggle_state, _, cx| {
                 write_format_on_save(toggle_state == &ToggleState::Selected, cx);
+            },
+        ))
+        .child(SwitchField::new(
+            "onboarding-enable-inlay-hints",
+            "Inlay Hints",
+            Some("See parameter names for function and method calls inline.".into()),
+            if read_inlay_hints(cx) {
+                ui::ToggleState::Selected
+            } else {
+                ui::ToggleState::Unselected
+            },
+            |toggle_state, _, cx| {
+                write_inlay_hints(toggle_state == &ToggleState::Selected, cx);
+            },
+        ))
+        .child(SwitchField::new(
+            "onboarding-git-blame-switch",
+            "Git Blame",
+            Some("See who committed each line on a given file.".into()),
+            if read_git_blame(cx) {
+                ui::ToggleState::Selected
+            } else {
+                ui::ToggleState::Unselected
+            },
+            |toggle_state, _, cx| {
+                set_git_blame(toggle_state == &ToggleState::Selected, cx);
             },
         ))
         .child(
@@ -421,37 +460,11 @@ fn render_popular_settings_section(window: &mut Window, cx: &mut App) -> impl In
                     .button_width(ui::rems_from_px(64.)),
                 ),
         )
-        .child(SwitchField::new(
-            "onboarding-enable-inlay-hints",
-            "Inlay Hints",
-            Some("See parameter names for function and method calls inline.".into()),
-            if read_inlay_hints(cx) {
-                ui::ToggleState::Selected
-            } else {
-                ui::ToggleState::Unselected
-            },
-            |toggle_state, _, cx| {
-                write_inlay_hints(toggle_state == &ToggleState::Selected, cx);
-            },
-        ))
-        .child(SwitchField::new(
-            "onboarding-git-blame-switch",
-            "Git Blame",
-            Some("See who committed each line on a given file.".into()),
-            if read_git_blame(cx) {
-                ui::ToggleState::Selected
-            } else {
-                ui::ToggleState::Unselected
-            },
-            |toggle_state, _, cx| {
-                set_git_blame(toggle_state == &ToggleState::Selected, cx);
-            },
-        ))
 }
 
 pub(crate) fn render_editing_page(window: &mut Window, cx: &mut App) -> impl IntoElement {
     v_flex()
         .gap_4()
-        .child(render_import_settings_section())
+        .child(render_import_settings_section(cx))
         .child(render_popular_settings_section(window, cx))
 }
