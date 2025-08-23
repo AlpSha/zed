@@ -4643,7 +4643,6 @@ impl LspStore {
                     Some((file, language, raw_buffer.remote_id()))
                 })
                 .sorted_by_key(|(file, _, _)| Reverse(file.worktree.read(cx).is_visible()));
-
             for (file, language, buffer_id) in buffers {
                 let worktree_id = file.worktree_id(cx);
                 let Some(worktree) = local
@@ -4685,7 +4684,6 @@ impl LspStore {
                             cx,
                         )
                         .collect::<Vec<_>>();
-
                     for node in nodes {
                         let server_id = node.server_id_or_init(|disposition| {
                             let path = &disposition.path;
@@ -5693,13 +5691,13 @@ impl LspStore {
                         let lsp_data = lsp_store.lsp_code_lens.entry(buffer_id).or_default();
                         if let Some(fetched_lens) = fetched_lens {
                             if lsp_data.lens_for_version == query_version_queried_for {
-                                lsp_data.lens.extend(fetched_lens.clone());
+                                lsp_data.lens.extend(fetched_lens);
                             } else if !lsp_data
                                 .lens_for_version
                                 .changed_since(&query_version_queried_for)
                             {
                                 lsp_data.lens_for_version = query_version_queried_for;
-                                lsp_data.lens = fetched_lens.clone();
+                                lsp_data.lens = fetched_lens;
                             }
                         }
                         lsp_data.update = None;
@@ -6694,14 +6692,14 @@ impl LspStore {
 
                         if let Some(fetched_colors) = fetched_colors {
                             if lsp_data.colors_for_version == query_version_queried_for {
-                                lsp_data.colors.extend(fetched_colors.clone());
+                                lsp_data.colors.extend(fetched_colors);
                                 lsp_data.cache_version += 1;
                             } else if !lsp_data
                                 .colors_for_version
                                 .changed_since(&query_version_queried_for)
                             {
                                 lsp_data.colors_for_version = query_version_queried_for;
-                                lsp_data.colors = fetched_colors.clone();
+                                lsp_data.colors = fetched_colors;
                                 lsp_data.cache_version += 1;
                             }
                         }
@@ -8762,7 +8760,7 @@ impl LspStore {
             (root_path.join(&old_path), root_path.join(&new_path))
         };
 
-        Self::will_rename_entry(
+        let _transaction = Self::will_rename_entry(
             this.downgrade(),
             worktree_id,
             &old_abs_path,
@@ -9031,13 +9029,22 @@ impl LspStore {
         lsp_store.update(&mut cx, |lsp_store, cx| {
             if let Some(server) = lsp_store.language_server_for_id(server_id) {
                 let text_document = if envelope.payload.current_file_only {
-                    let buffer_id = BufferId::new(envelope.payload.buffer_id)?;
-                    lsp_store
-                        .buffer_store()
-                        .read(cx)
-                        .get(buffer_id)
-                        .and_then(|buffer| Some(buffer.read(cx).file()?.as_local()?.abs_path(cx)))
-                        .map(|path| make_text_document_identifier(&path))
+                    let buffer_id = envelope
+                        .payload
+                        .buffer_id
+                        .map(|id| BufferId::new(id))
+                        .transpose()?;
+                    buffer_id
+                        .and_then(|buffer_id| {
+                            lsp_store
+                                .buffer_store()
+                                .read(cx)
+                                .get(buffer_id)
+                                .and_then(|buffer| {
+                                    Some(buffer.read(cx).file()?.as_local()?.abs_path(cx))
+                                })
+                                .map(|path| make_text_document_identifier(&path))
+                        })
                         .transpose()?
                 } else {
                     None
@@ -9224,7 +9231,7 @@ impl LspStore {
         new_path: &Path,
         is_dir: bool,
         cx: AsyncApp,
-    ) -> Task<()> {
+    ) -> Task<ProjectTransaction> {
         let old_uri = lsp::Url::from_file_path(old_path).ok().map(String::from);
         let new_uri = lsp::Url::from_file_path(new_path).ok().map(String::from);
         cx.spawn(async move |cx| {
@@ -9257,7 +9264,7 @@ impl LspStore {
                                     .log_err()
                                     .flatten()?;
 
-                                LocalLspStore::deserialize_workspace_edit(
+                                let transaction = LocalLspStore::deserialize_workspace_edit(
                                     this.upgrade()?,
                                     edit,
                                     false,
@@ -9265,8 +9272,8 @@ impl LspStore {
                                     cx,
                                 )
                                 .await
-                                .ok();
-                                Some(())
+                                .ok()?;
+                                Some(transaction)
                             }
                         });
                         tasks.push(apply_edit);
@@ -9276,11 +9283,17 @@ impl LspStore {
             })
             .ok()
             .flatten();
+            let mut merged_transaction = ProjectTransaction::default();
             for task in tasks {
                 // Await on tasks sequentially so that the order of application of edits is deterministic
                 // (at least with regards to the order of registration of language servers)
-                task.await;
+                if let Some(transaction) = task.await {
+                    for (buffer, buffer_transaction) in transaction.0 {
+                        merged_transaction.0.insert(buffer, buffer_transaction);
+                    }
+                }
             }
+            merged_transaction
         })
     }
 
