@@ -66,8 +66,8 @@
       "ctrl-k": "editor::CutToEndOfLine",
       "ctrl-k ctrl-q": "editor::Rewrap",
       "ctrl-k q": "editor::Rewrap",
-      "ctrl-backspace": "editor::DeleteToPreviousWordStart",
-      "ctrl-delete": "editor::DeleteToNextWordEnd",
+      "ctrl-backspace": ["editor::DeleteToPreviousWordStart", { "ignore_newlines": false, "ignore_brackets": false }],
+      "ctrl-delete": ["editor::DeleteToNextWordEnd", { "ignore_newlines": false, "ignore_brackets": false }],
       "cut": "editor::Cut",
       "shift-delete": "editor::Cut",
       "ctrl-x": "editor::Cut",
@@ -599,7 +599,7 @@
       "ctrl-n": "workspace::NewFile",
       "shift-new": "workspace::NewWindow",
       "ctrl-shift-n": "workspace::NewWindow",
-      "ctrl-`": "terminal_panel::ToggleFocus",
+      "ctrl-`": "terminal_panel::Toggle",
       "f10": ["app_menu::OpenApplicationMenu", "Zed"],
       "alt-1": ["workspace::ActivatePane", 0],
       "alt-2": ["workspace::ActivatePane", 1],
@@ -644,6 +644,7 @@
       "alt-save": "workspace::SaveAll",
       "ctrl-k s": "workspace::SaveAll",
       "ctrl-k m": "language_selector::Toggle",
+      "ctrl-m ctrl-m": "toolchain::AddToolchain",
       "escape": "workspace::Unfollow",
       "ctrl-k ctrl-left": "workspace::ActivatePaneLeft",
       "ctrl-k ctrl-right": "workspace::ActivatePaneRight",
@@ -1073,6 +1074,13 @@
     "use_key_equivalents": true,
     "bindings": {
       "tab": "channel_modal::ToggleMode"
+    }
+  },
+  {
+    "context": "ToolchainSelector",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-shift-a": "toolchain::AddToolchain"
     }
   },
   {
