@@ -39,7 +39,6 @@
       "f7": "debugger::StepOver",
       "ctrl-f11": "debugger::StepInto",
       "shift-f11": "debugger::StepOut",
-      "ctrl-r": "debugger::HotReload",
       "f11": "zed::ToggleFullScreen",
       "ctrl-alt-z": "edit_prediction::RateCompletions",
       "ctrl-alt-shift-i": "edit_prediction::ToggleMenu",
