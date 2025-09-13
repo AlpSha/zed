@@ -8,7 +8,7 @@ use std::{ops::Range, sync::Arc};
 use agent_settings::AgentSettings;
 use anyhow::Result;
 use assistant_tool::{ToolSource, ToolWorkingSet};
-use cloud_llm_client::Plan;
+use cloud_llm_client::{Plan, PlanV1, PlanV2};
 use collections::HashMap;
 use context_server::ContextServerId;
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
@@ -35,8 +35,7 @@ use project::{
 use settings::{Settings, SettingsStore, update_settings_file};
 use ui::{
     Chip, CommonAnimationExt, ContextMenu, Disclosure, Divider, DividerColor, ElevationIndex,
-    Indicator, PopoverMenu, Scrollbar, ScrollbarState, Switch, SwitchColor, SwitchField, Tooltip,
-    prelude::*,
+    Indicator, PopoverMenu, Switch, SwitchColor, SwitchField, Tooltip, WithScrollbar, prelude::*,
 };
 use util::ResultExt as _;
 use workspace::{Workspace, create_and_open_local_file};
@@ -64,7 +63,6 @@ pub struct AgentConfiguration {
     tools: Entity<ToolWorkingSet>,
     _registry_subscription: Subscription,
     scroll_handle: ScrollHandle,
-    scrollbar_state: ScrollbarState,
     _check_for_gemini: Task<()>,
 }
 
@@ -101,9 +99,6 @@ impl AgentConfiguration {
         cx.subscribe(&context_server_store, |_, _, _, cx| cx.notify())
             .detach();
 
-        let scroll_handle = ScrollHandle::new();
-        let scrollbar_state = ScrollbarState::new(scroll_handle.clone());
-
         let mut this = Self {
             fs,
             language_registry,
@@ -116,8 +111,7 @@ impl AgentConfiguration {
             expanded_provider_configurations: HashMap::default(),
             tools,
             _registry_subscription: registry_subscription,
-            scroll_handle,
-            scrollbar_state,
+            scroll_handle: ScrollHandle::new(),
             _check_for_gemini: Task::ready(()),
         };
         this.build_provider_configuration_views(window, cx);
@@ -515,11 +509,15 @@ impl AgentConfiguration {
                 .blend(cx.theme().colors().text_accent.opacity(0.2));
 
             let (plan_name, label_color, bg_color) = match plan {
-                Plan::ZedFree | Plan::ZedFreeV2 => ("Free", Color::Default, free_chip_bg),
-                Plan::ZedProTrial | Plan::ZedProTrialV2 => {
+                Plan::V1(PlanV1::ZedFree) | Plan::V2(PlanV2::ZedFree) => {
+                    ("Free", Color::Default, free_chip_bg)
+                }
+                Plan::V1(PlanV1::ZedProTrial) | Plan::V2(PlanV2::ZedProTrial) => {
                     ("Pro Trial", Color::Accent, pro_chip_bg)
                 }
-                Plan::ZedPro | Plan::ZedProV2 => ("Pro", Color::Accent, pro_chip_bg),
+                Plan::V1(PlanV1::ZedPro) | Plan::V2(PlanV2::ZedPro) => {
+                    ("Pro", Color::Accent, pro_chip_bg)
+                }
             };
 
             Chip::new(plan_name.to_string())
@@ -1154,41 +1152,20 @@ impl Render for AgentConfiguration {
             .pb_8()
             .bg(cx.theme().colors().panel_background)
             .child(
-                v_flex()
-                    .id("assistant-configuration-content")
-                    .track_scroll(&self.scroll_handle)
-                    .size_full()
-                    .overflow_y_scroll()
-                    .child(self.render_general_settings_section(cx))
-                    .child(self.render_agent_servers_section(cx))
-                    .child(self.render_context_servers_section(window, cx))
-                    .child(self.render_provider_configuration_section(cx)),
-            )
-            .child(
                 div()
-                    .id("assistant-configuration-scrollbar")
-                    .occlude()
-                    .absolute()
-                    .right(px(3.))
-                    .top_0()
-                    .bottom_0()
-                    .pb_6()
-                    .w(px(12.))
-                    .cursor_default()
-                    .on_mouse_move(cx.listener(|_, _, _window, cx| {
-                        cx.notify();
-                        cx.stop_propagation()
-                    }))
-                    .on_hover(|_, _window, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_any_mouse_down(|_, _window, cx| {
-                        cx.stop_propagation();
-                    })
-                    .on_scroll_wheel(cx.listener(|_, _, _window, cx| {
-                        cx.notify();
-                    }))
-                    .children(Scrollbar::vertical(self.scrollbar_state.clone())),
+                    .size_full()
+                    .child(
+                        v_flex()
+                            .id("assistant-configuration-content")
+                            .track_scroll(&self.scroll_handle)
+                            .size_full()
+                            .overflow_y_scroll()
+                            .child(self.render_general_settings_section(cx))
+                            .child(self.render_agent_servers_section(cx))
+                            .child(self.render_context_servers_section(window, cx))
+                            .child(self.render_provider_configuration_section(cx)),
+                    )
+                    .vertical_scrollbar_for(self.scroll_handle.clone(), window, cx),
             )
     }
 }

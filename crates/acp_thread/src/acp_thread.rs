@@ -813,7 +813,6 @@ impl EventEmitter<AcpThreadEvent> for AcpThread {}
 #[derive(PartialEq, Eq, Debug)]
 pub enum ThreadStatus {
     Idle,
-    WaitingForToolConfirmation,
     Generating,
 }
 
@@ -863,7 +862,7 @@ impl AcpThread {
         mut prompt_capabilities_rx: watch::Receiver<acp::PromptCapabilities>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prompt_capabilities = *prompt_capabilities_rx.borrow();
+        let prompt_capabilities = prompt_capabilities_rx.borrow().clone();
         let task = cx.spawn::<_, anyhow::Result<()>>(async move |this, cx| {
             loop {
                 let caps = prompt_capabilities_rx.recv().await?;
@@ -907,7 +906,7 @@ impl AcpThread {
     }
 
     pub fn prompt_capabilities(&self) -> acp::PromptCapabilities {
-        self.prompt_capabilities
+        self.prompt_capabilities.clone()
     }
 
     pub fn connection(&self) -> &Rc<dyn AgentConnection> {
@@ -936,11 +935,7 @@ impl AcpThread {
 
     pub fn status(&self) -> ThreadStatus {
         if self.send_task.is_some() {
-            if self.waiting_for_tool_confirmation() {
-                ThreadStatus::WaitingForToolConfirmation
-            } else {
-                ThreadStatus::Generating
-            }
+            ThreadStatus::Generating
         } else {
             ThreadStatus::Idle
         }
@@ -1382,26 +1377,27 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
     }
 
-    /// Returns true if the last turn is awaiting tool authorization
-    pub fn waiting_for_tool_confirmation(&self) -> bool {
+    pub fn first_tool_awaiting_confirmation(&self) -> Option<&ToolCall> {
+        let mut first_tool_call = None;
+
         for entry in self.entries.iter().rev() {
             match &entry {
-                AgentThreadEntry::ToolCall(call) => match call.status {
-                    ToolCallStatus::WaitingForConfirmation { .. } => return true,
-                    ToolCallStatus::Pending
-                    | ToolCallStatus::InProgress
-                    | ToolCallStatus::Completed
-                    | ToolCallStatus::Failed
-                    | ToolCallStatus::Rejected
-                    | ToolCallStatus::Canceled => continue,
-                },
+                AgentThreadEntry::ToolCall(call) => {
+                    if let ToolCallStatus::WaitingForConfirmation { .. } = call.status {
+                        first_tool_call = Some(call);
+                    } else {
+                        continue;
+                    }
+                }
                 AgentThreadEntry::UserMessage(_) | AgentThreadEntry::AssistantMessage(_) => {
-                    // Reached the beginning of the turn
-                    return false;
+                    // Reached the beginning of the turn.
+                    // If we had pending permission requests in the previous turn, they have been cancelled.
+                    break;
                 }
             }
         }
-        false
+
+        first_tool_call
     }
 
     pub fn plan(&self) -> &Plan {
@@ -1450,6 +1446,7 @@ impl AcpThread {
             vec![acp::ContentBlock::Text(acp::TextContent {
                 text: message.to_string(),
                 annotations: None,
+                meta: None,
             })],
             cx,
         )
@@ -1468,6 +1465,7 @@ impl AcpThread {
         let request = acp::PromptRequest {
             prompt: message.clone(),
             session_id: self.session_id.clone(),
+            meta: None,
         };
         let git_store = self.project.read(cx).git_store().clone();
 
@@ -1559,7 +1557,8 @@ impl AcpThread {
                         let canceled = matches!(
                             result,
                             Ok(Ok(acp::PromptResponse {
-                                stop_reason: acp::StopReason::Cancelled
+                                stop_reason: acp::StopReason::Cancelled,
+                                meta: None,
                             }))
                         );
 
@@ -1575,6 +1574,7 @@ impl AcpThread {
                         // Handle refusal - distinguish between user prompt and tool call refusals
                         if let Ok(Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::Refusal,
+                            meta: _,
                         })) = result
                         {
                             if let Some((user_msg_ix, _)) = this.last_user_message() {
@@ -2167,6 +2167,7 @@ mod tests {
                 acp::ContentBlock::Text(acp::TextContent {
                     annotations: None,
                     text: "Hello, ".to_string(),
+                    meta: None,
                 }),
                 cx,
             );
@@ -2190,6 +2191,7 @@ mod tests {
                 acp::ContentBlock::Text(acp::TextContent {
                     annotations: None,
                     text: "world!".to_string(),
+                    meta: None,
                 }),
                 cx,
             );
@@ -2211,6 +2213,7 @@ mod tests {
                 acp::ContentBlock::Text(acp::TextContent {
                     annotations: None,
                     text: "Assistant response".to_string(),
+                    meta: None,
                 }),
                 false,
                 cx,
@@ -2224,6 +2227,7 @@ mod tests {
                 acp::ContentBlock::Text(acp::TextContent {
                     annotations: None,
                     text: "New user message".to_string(),
+                    meta: None,
                 }),
                 cx,
             );
@@ -2269,6 +2273,7 @@ mod tests {
                     })?;
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -2339,6 +2344,7 @@ mod tests {
                         .unwrap();
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -2407,6 +2413,7 @@ mod tests {
                                     locations: vec![],
                                     raw_input: None,
                                     raw_output: None,
+                                    meta: None,
                                 }),
                                 cx,
                             )
@@ -2415,6 +2422,7 @@ mod tests {
                         .unwrap();
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -2463,6 +2471,7 @@ mod tests {
                             status: Some(acp::ToolCallStatus::Completed),
                             ..Default::default()
                         },
+                        meta: None,
                     }),
                     cx,
                 )
@@ -2505,11 +2514,13 @@ mod tests {
                                             path: "/test/test.txt".into(),
                                             old_text: None,
                                             new_text: "foo".into(),
+                                            meta: None,
                                         },
                                     }],
                                     locations: vec![],
                                     raw_input: None,
                                     raw_output: None,
+                                    meta: None,
                                 }),
                                 cx,
                             )
@@ -2518,6 +2529,7 @@ mod tests {
                         .unwrap();
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -2580,6 +2592,7 @@ mod tests {
                     })?;
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -2747,6 +2760,7 @@ mod tests {
                                         raw_output: Some(
                                             serde_json::json!({"result": "inappropriate content"}),
                                         ),
+                                        meta: None,
                                     }),
                                     cx,
                                 )
@@ -2756,10 +2770,12 @@ mod tests {
                         // Now return refusal because of the tool result
                         Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::Refusal,
+                            meta: None,
                         })
                     } else {
                         Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::EndTurn,
+                            meta: None,
                         })
                     }
                 }
@@ -2793,6 +2809,7 @@ mod tests {
                 vec![acp::ContentBlock::Text(acp::TextContent {
                     text: "Hello".into(),
                     annotations: None,
+                    meta: None,
                 })],
                 cx,
             )
@@ -2845,6 +2862,7 @@ mod tests {
                     async move {
                         Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::Refusal,
+                            meta: None,
                         })
                     }
                     .boxed_local()
@@ -2852,6 +2870,7 @@ mod tests {
                     async move {
                         Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::EndTurn,
+                            meta: None,
                         })
                     }
                     .boxed_local()
@@ -2913,6 +2932,7 @@ mod tests {
                     if refuse_next.load(SeqCst) {
                         return Ok(acp::PromptResponse {
                             stop_reason: acp::StopReason::Refusal,
+                            meta: None,
                         });
                     }
 
@@ -2931,6 +2951,7 @@ mod tests {
                     })?;
                     Ok(acp::PromptResponse {
                         stop_reason: acp::StopReason::EndTurn,
+                        meta: None,
                     })
                 }
                 .boxed_local()
@@ -3086,6 +3107,7 @@ mod tests {
                         image: true,
                         audio: true,
                         embedded_context: true,
+                        meta: None,
                     }),
                     cx,
                 )
@@ -3117,6 +3139,7 @@ mod tests {
             } else {
                 Task::ready(Ok(acp::PromptResponse {
                     stop_reason: acp::StopReason::EndTurn,
+                    meta: None,
                 }))
             }
         }
