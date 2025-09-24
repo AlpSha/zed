@@ -24,11 +24,15 @@ pub struct PredictEditsRequest {
     pub can_collect_data: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostic_groups: Vec<DiagnosticGroup>,
+    #[serde(skip_serializing_if = "is_default", default)]
+    pub diagnostic_groups_truncated: bool,
     /// Info about the git repository state, only present when can_collect_data is true.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub git_info: Option<PredictEditsGitInfo>,
+    // Only available to staff
     #[serde(default)]
     pub debug_info: bool,
+    pub prompt_max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +52,9 @@ pub struct Signature {
     pub text_is_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub parent_index: Option<usize>,
+    /// Range of `text` within the file, possibly truncated according to `text_is_truncated`. The
+    /// file is implicitly the file that contains the descendant declaration or excerpt.
+    pub range: Range<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +62,7 @@ pub struct ReferencedDeclaration {
     pub path: PathBuf,
     pub text: String,
     pub text_is_truncated: bool,
-    /// Range of `text` within file, potentially truncated according to `text_is_truncated`
+    /// Range of `text` within file, possibly truncated according to `text_is_truncated`
     pub range: Range<usize>,
     /// Range within `text`
     pub signature_range: Range<usize>,
@@ -89,10 +96,8 @@ pub struct ScoreComponents {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagnosticGroup {
-    pub language_server: String,
-    pub diagnostic_group: serde_json::Value,
-}
+#[serde(transparent)]
+pub struct DiagnosticGroup(pub Box<serde_json::value::RawValue>);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictEditsResponse {
@@ -115,4 +120,8 @@ pub struct Edit {
     pub path: PathBuf,
     pub range: Range<usize>,
     pub content: String,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }

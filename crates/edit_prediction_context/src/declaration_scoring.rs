@@ -3,7 +3,7 @@ use itertools::Itertools as _;
 use language::BufferSnapshot;
 use ordered_float::OrderedFloat;
 use serde::Serialize;
-use std::{collections::HashMap, ops::Range};
+use std::{cmp::Reverse, collections::HashMap, ops::Range};
 use strum::EnumIter;
 use text::{Point, ToPoint};
 
@@ -40,10 +40,9 @@ impl ScoredSnippet {
     }
 
     pub fn size(&self, style: SnippetStyle) -> usize {
-        // TODO: how to handle truncation?
         match &self.declaration {
             Declaration::File { declaration, .. } => match style {
-                SnippetStyle::Signature => declaration.signature_range_in_text.len(),
+                SnippetStyle::Signature => declaration.signature_range.len(),
                 SnippetStyle::Declaration => declaration.text.len(),
             },
             Declaration::Buffer { declaration, .. } => match style {
@@ -160,11 +159,10 @@ pub fn scored_snippets(
         .collect::<Vec<_>>();
 
     snippets.sort_unstable_by_key(|snippet| {
-        OrderedFloat(
-            snippet
-                .score_density(SnippetStyle::Declaration)
-                .max(snippet.score_density(SnippetStyle::Signature)),
-        )
+        let score_density = snippet
+            .score_density(SnippetStyle::Declaration)
+            .max(snippet.score_density(SnippetStyle::Signature));
+        Reverse(OrderedFloat(score_density))
     });
 
     snippets
@@ -276,6 +274,8 @@ pub struct Scores {
 
 impl Scores {
     fn score(components: &ScoreComponents) -> Scores {
+        // TODO: handle truncation
+
         // Score related to how likely this is the correct declaration, range 0 to 1
         let accuracy_score = if components.is_same_file {
             // TODO: use declaration_line_distance_rank
