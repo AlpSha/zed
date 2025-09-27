@@ -83,7 +83,7 @@ use aho_corasick::AhoCorasick;
 use anyhow::{Context as _, Result, anyhow};
 use blink_manager::BlinkManager;
 use buffer_diff::DiffHunkStatus;
-use client::{Collaborator, ParticipantIndex};
+use client::{Collaborator, ParticipantIndex, parse_zed_link};
 use clock::{AGENT_REPLICA_ID, ReplicaId};
 use code_context_menus::{
     AvailableCodeAction, CodeActionContents, CodeActionsItem, CodeActionsMenu, CodeContextMenu,
@@ -592,11 +592,22 @@ pub fn make_inlay_hints_style(cx: &mut App) -> HighlightStyle {
         .inlay_hints
         .show_background;
 
-    HighlightStyle {
-        color: Some(cx.theme().status().hint),
-        background_color: show_background.then(|| cx.theme().status().hint_background),
-        ..HighlightStyle::default()
+    let mut style = cx.theme().syntax().get("hint");
+
+    if style.color.is_none() {
+        style.color = Some(cx.theme().status().hint);
     }
+
+    if !show_background {
+        style.background_color = None;
+        return style;
+    }
+
+    if style.background_color.is_none() {
+        style.background_color = Some(cx.theme().status().hint_background);
+    }
+
+    style
 }
 
 pub fn make_suggestion_styles(cx: &mut App) -> EditPredictionStyles {
@@ -3058,7 +3069,7 @@ impl Editor {
             self.buffer.update(cx, |buffer, cx| {
                 buffer.set_active_selections(
                     &selection_anchors,
-                    self.selections.line_mode,
+                    self.selections.line_mode(),
                     self.cursor_shape,
                     cx,
                 )
@@ -6900,7 +6911,7 @@ impl Editor {
         if !EditorSettings::get_global(cx).selection_highlight {
             return None;
         }
-        if self.selections.count() != 1 || self.selections.line_mode {
+        if self.selections.count() != 1 || self.selections.line_mode() {
             return None;
         }
         let selection = self.selections.newest::<Point>(cx);
@@ -12269,7 +12280,7 @@ impl Editor {
             let mut is_first = true;
             for selection in &mut selections {
                 let is_entire_line =
-                    (selection.is_empty() && cut_no_selection_line) || self.selections.line_mode;
+                    (selection.is_empty() && cut_no_selection_line) || self.selections.line_mode();
                 if is_entire_line {
                     selection.start = Point::new(selection.start.row, 0);
                     if !selection.is_empty() && selection.end.column == 0 {
@@ -12369,7 +12380,7 @@ impl Editor {
             for selection in &selections {
                 let mut start = selection.start;
                 let mut end = selection.end;
-                let is_entire_line = selection.is_empty() || self.selections.line_mode;
+                let is_entire_line = selection.is_empty() || self.selections.line_mode();
                 if is_entire_line {
                     start = Point::new(start.row, 0);
                     end = cmp::min(max_point, Point::new(end.row + 1, 0));
@@ -16315,7 +16326,7 @@ impl Editor {
             None
         };
 
-        let url_finder = cx.spawn_in(window, async move |editor, cx| {
+        let url_finder = cx.spawn_in(window, async move |_editor, cx| {
             let url = if let Some(end_pos) = end_position {
                 find_url_from_range(&buffer, start_position..end_pos, cx.clone())
             } else {
@@ -16323,12 +16334,16 @@ impl Editor {
             };
 
             if let Some(url) = url {
-                editor.update(cx, |_, cx| {
-                    cx.open_url(&url);
-                })
-            } else {
-                Ok(())
+                cx.update(|window, cx| {
+                    if parse_zed_link(&url, cx).is_some() {
+                        window.dispatch_action(Box::new(zed_actions::OpenZedUrl { url }), cx);
+                    } else {
+                        cx.open_url(&url);
+                    }
+                })?;
             }
+
+            anyhow::Ok(())
         });
 
         url_finder.detach();
@@ -21357,7 +21372,7 @@ impl Editor {
                 if self.leader_id.is_none() {
                     buffer.set_active_selections(
                         &self.selections.disjoint_anchors_arc(),
-                        self.selections.line_mode,
+                        self.selections.line_mode(),
                         self.cursor_shape,
                         cx,
                     );
