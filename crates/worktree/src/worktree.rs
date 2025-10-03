@@ -622,7 +622,7 @@ impl Worktree {
             id: self.id().to_proto(),
             root_name: self.root_name().to_proto(),
             visible: self.is_visible(),
-            abs_path: self.abs_path().to_string_lossy().to_string(),
+            abs_path: self.abs_path().to_string_lossy().into_owned(),
         }
     }
 
@@ -982,7 +982,7 @@ impl Worktree {
                     .join("~", &*stripped.to_string_lossy())
                     .unwrap()
             } else {
-                full_path.to_string_lossy().to_string()
+                full_path.to_string_lossy().into_owned()
             };
 
             if worktree_relative_path.components().next().is_some() {
@@ -1103,7 +1103,7 @@ impl LocalWorktree {
             }
         });
         self._background_scanner_tasks = vec![background_scanner, scan_state_updater];
-        self.is_scanning = watch::channel_with(true);
+        *self.is_scanning.0.borrow_mut() = true;
     }
 
     fn set_snapshot(
@@ -2072,7 +2072,7 @@ impl Snapshot {
         proto::UpdateWorktree {
             project_id,
             worktree_id,
-            abs_path: self.abs_path().to_string_lossy().to_string(),
+            abs_path: self.abs_path().to_string_lossy().into_owned(),
             root_name: self.root_name().to_proto(),
             updated_entries,
             removed_entries: Vec::new(),
@@ -2415,7 +2415,7 @@ impl LocalSnapshot {
         proto::UpdateWorktree {
             project_id,
             worktree_id,
-            abs_path: self.abs_path().to_string_lossy().to_string(),
+            abs_path: self.abs_path().to_string_lossy().into_owned(),
             root_name: self.root_name().to_proto(),
             updated_entries,
             removed_entries,
@@ -4547,10 +4547,21 @@ impl BackgroundScanner {
 
         let mut entries_by_id_edits = Vec::new();
         let mut entries_by_path_edits = Vec::new();
-        let path = job
+        let Some(path) = job
             .abs_path
             .strip_prefix(snapshot.abs_path.as_path())
-            .unwrap();
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to strip prefix '{}' from path '{}'",
+                    snapshot.abs_path.as_path().display(),
+                    job.abs_path.display()
+                )
+            })
+            .log_err()
+        else {
+            return;
+        };
+
         let Some(path) = RelPath::new(&path, PathStyle::local()).log_err() else {
             return;
         };
@@ -5354,7 +5365,7 @@ impl<'a> From<&'a Entry> for proto::Entry {
             canonical_path: entry
                 .canonical_path
                 .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
+                .map(|path| path.to_string_lossy().into_owned()),
         }
     }
 }
