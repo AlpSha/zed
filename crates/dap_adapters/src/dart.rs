@@ -1,6 +1,7 @@
 use crate::*;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use collections::FxHashMap;
 use dap::{
     DebugRequest, StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
     adapters::{DebugAdapter, DebugAdapterBinary, DebugAdapterName, DebugTaskDefinition},
@@ -209,6 +210,7 @@ impl DebugAdapter for DartDebugAdapter {
         task_definition: &DebugTaskDefinition,
         _user_installed_path: Option<PathBuf>,
         _extra_args: Option<Vec<String>>,
+        _extra_envs: Option<FxHashMap<String, String>>,
         _cx: &mut AsyncApp,
     ) -> Result<DebugAdapterBinary> {
         let is_flutter_project = self.is_flutter_project(delegate).await;
