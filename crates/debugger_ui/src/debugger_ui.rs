@@ -352,8 +352,10 @@ pub fn init(cx: &mut App) {
                                 maybe!({
                                     let (buffer, position, _) = editor
                                         .update(cx, |editor, cx| {
-                                            let cursor_point: language::Point =
-                                                editor.selections.newest(cx).head();
+                                            let cursor_point: language::Point = editor
+                                                .selections
+                                                .newest(&editor.display_snapshot(cx))
+                                                .head();
 
                                             editor
                                                 .buffer()
@@ -403,7 +405,10 @@ pub fn init(cx: &mut App) {
                                 let text = editor
                                     .update(cx, |editor, cx| {
                                         editor.text_for_range(
-                                            editor.selections.newest(cx).range(),
+                                            editor
+                                                .selections
+                                                .newest(&editor.display_snapshot(cx))
+                                                .range(),
                                             &mut None,
                                             window,
                                             cx,

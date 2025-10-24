@@ -125,7 +125,10 @@ async fn build_remote_server_from_source(
     use std::env::VarError;
     use std::path::Path;
 
-    let build_remote_server = std::env::var("ZED_BUILD_REMOTE_SERVER").unwrap_or_default();
+    // By default, we make building remote server from source opt-out and we do not force artifact compression
+    // for quicker builds.
+    let build_remote_server =
+        std::env::var("ZED_BUILD_REMOTE_SERVER").unwrap_or("nocompress".into());
 
     if build_remote_server == "false"
         || build_remote_server == "no"
@@ -183,6 +186,7 @@ async fn build_remote_server_from_source(
         log::info!("building remote server binary from source");
         run_cmd(
             Command::new("cargo")
+                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                 .args([
                     "build",
                     "--package",

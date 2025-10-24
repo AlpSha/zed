@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt, path::Path, sync::LazyLock};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShellKind {
     #[default]
     Posix,
@@ -45,6 +46,7 @@ pub fn get_windows_git_bash() -> Option<String> {
         let git = which::which("git").ok()?;
         let git_bash = git.parent()?.parent()?.join("bin").join("bash.exe");
         if git_bash.is_file() {
+            log::info!("Found git-bash at {}", git_bash.display());
             Some(git_bash.to_string_lossy().to_string())
         } else {
             None
