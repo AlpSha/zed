@@ -841,12 +841,11 @@ impl DebugPanel {
                                                 ))
                                                 .tooltip({
                                                     let focus_handle = focus_handle.clone();
-                                                    move |window, cx| {
+                                                    move |_window, cx| {
                                                         Tooltip::for_action_in(
                                                             "Hot Reload",
                                                             &crate::HotReload,
                                                             &focus_handle,
-                                                            window,
                                                             cx,
                                                         )
                                                     }
