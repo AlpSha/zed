@@ -203,17 +203,6 @@ impl AsMut<Child> for MasterProcess {
     }
 }
 
-macro_rules! shell_script {
-    ($fmt:expr, $($name:ident = $arg:expr),+ $(,)?) => {{
-        format!(
-            $fmt,
-            $(
-                $name = shlex::try_quote($arg).unwrap()
-            ),+
-        )
-    }};
-}
-
 #[async_trait(?Send)]
 impl RemoteConnection for SshRemoteConnection {
     async fn kill(&self) -> Result<()> {
@@ -301,40 +290,47 @@ impl RemoteConnection for SshRemoteConnection {
             self.build_scp_command(&src_path, &dest_path_str, Some(&["-C", "-r"]));
 
         cx.background_spawn(async move {
+            // We will try SFTP first, and if that fails, we will fall back to SCP.
+            // If SCP fails also, we give up and return an error.
+            // The reason we allow a fallback from SFTP to SCP is that if the user has to specify a password,
+            // depending on the implementation of SSH stack, SFTP may disable interactive password prompts in batch mode.
+            // This is for example the case on Windows as evidenced by this implementation snippet:
+            // https://github.com/PowerShell/openssh-portable/blob/b8c08ef9da9450a94a9c5ef717d96a7bd83f3332/sshconnect2.c#L417
             if Self::is_sftp_available().await {
                 log::debug!("using SFTP for directory upload");
                 let mut child = sftp_command.spawn()?;
                 if let Some(mut stdin) = child.stdin.take() {
                     use futures::AsyncWriteExt;
-                    let sftp_batch = format!("put -r {} {}\n", src_path.display(), dest_path_str);
+                    let sftp_batch = format!("put -r {src_path_display} {dest_path_str}\n");
                     stdin.write_all(sftp_batch.as_bytes()).await?;
                     drop(stdin);
                 }
 
                 let output = child.output().await?;
-                anyhow::ensure!(
-                    output.status.success(),
-                    "failed to upload directory via SFTP {} -> {}: {}",
-                    src_path_display,
-                    dest_path_str,
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                if output.status.success() {
+                    return Ok(());
+                }
 
-                return Ok(());
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log::debug!("failed to upload directory via SFTP {src_path_display} -> {dest_path_str}: {stderr}");
             }
 
             log::debug!("using SCP for directory upload");
             let output = scp_command.output().await?;
 
-            anyhow::ensure!(
-                output.status.success(),
-                "failed to upload directory via SCP {} -> {}: {}",
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::debug!("failed to upload directory via SCP {src_path_display} -> {dest_path_str}: {stderr}");
+
+            anyhow::bail!(
+                "failed to upload directory via SFTP/SCP {} -> {}: {}",
                 src_path_display,
                 dest_path_str,
-                String::from_utf8_lossy(&output.stderr)
+                stderr,
             );
-
-            Ok(())
         })
     }
 
@@ -738,21 +734,23 @@ impl SshRemoteConnection {
         delegate.set_status(Some("Extracting remote development server"), cx);
         let server_mode = 0o755;
 
+        let shell_kind = ShellKind::Posix;
         let orig_tmp_path = tmp_path.display(self.path_style());
+        let server_mode = format!("{:o}", server_mode);
+        let server_mode = shell_kind
+            .try_quote(&server_mode)
+            .context("shell quoting")?;
+        let dst_path = dst_path.display(self.path_style());
+        let dst_path = shell_kind.try_quote(&dst_path).context("shell quoting")?;
         let script = if let Some(tmp_path) = orig_tmp_path.strip_suffix(".gz") {
-            shell_script!(
+            format!(
                 "gunzip -f {orig_tmp_path} && chmod {server_mode} {tmp_path} && mv {tmp_path} {dst_path}",
-                server_mode = &format!("{:o}", server_mode),
-                dst_path = &dst_path.display(self.path_style()),
             )
         } else {
-            shell_script!(
-                "chmod {server_mode} {orig_tmp_path} && mv {orig_tmp_path} {dst_path}",
-                server_mode = &format!("{:o}", server_mode),
-                dst_path = &dst_path.display(self.path_style())
-            )
+            format!("chmod {server_mode} {orig_tmp_path} && mv {orig_tmp_path} {dst_path}",)
         };
-        self.socket.run_command("sh", &["-c", &script]).await?;
+        let args = shell_kind.args_for_shell(false, script.to_string());
+        self.socket.run_command("sh", &args).await?;
         Ok(())
     }
 
@@ -799,12 +797,19 @@ impl SshRemoteConnection {
     async fn upload_file(&self, src_path: &Path, dest_path: &RelPath) -> Result<()> {
         log::debug!("uploading file {:?} to {:?}", src_path, dest_path);
 
+        let src_path_display = src_path.display().to_string();
         let dest_path_str = dest_path.display(self.path_style());
 
+        // We will try SFTP first, and if that fails, we will fall back to SCP.
+        // If SCP fails also, we give up and return an error.
+        // The reason we allow a fallback from SFTP to SCP is that if the user has to specify a password,
+        // depending on the implementation of SSH stack, SFTP may disable interactive password prompts in batch mode.
+        // This is for example the case on Windows as evidenced by this implementation snippet:
+        // https://github.com/PowerShell/openssh-portable/blob/b8c08ef9da9450a94a9c5ef717d96a7bd83f3332/sshconnect2.c#L417
         if Self::is_sftp_available().await {
             log::debug!("using SFTP for file upload");
             let mut command = self.build_sftp_command();
-            let sftp_batch = format!("put {} {}\n", src_path.display(), dest_path_str);
+            let sftp_batch = format!("put {src_path_display} {dest_path_str}\n");
 
             let mut child = command.spawn()?;
             if let Some(mut stdin) = child.stdin.take() {
@@ -814,30 +819,34 @@ impl SshRemoteConnection {
             }
 
             let output = child.output().await?;
-            anyhow::ensure!(
-                output.status.success(),
-                "failed to upload file via SFTP {} -> {}: {}",
-                src_path.display(),
-                dest_path_str,
-                String::from_utf8_lossy(&output.stderr)
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::debug!(
+                "failed to upload file via SFTP {src_path_display} -> {dest_path_str}: {stderr}"
             );
-
-            Ok(())
-        } else {
-            log::debug!("using SCP for file upload");
-            let mut command = self.build_scp_command(src_path, &dest_path_str, None);
-            let output = command.output().await?;
-
-            anyhow::ensure!(
-                output.status.success(),
-                "failed to upload file via SCP {} -> {}: {}",
-                src_path.display(),
-                dest_path_str,
-                String::from_utf8_lossy(&output.stderr)
-            );
-
-            Ok(())
         }
+
+        log::debug!("using SCP for file upload");
+        let mut command = self.build_scp_command(src_path, &dest_path_str, None);
+        let output = command.output().await?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!(
+            "failed to upload file via SCP {src_path_display} -> {dest_path_str}: {stderr}",
+        );
+        anyhow::bail!(
+            "failed to upload file via STFP/SCP {} -> {}: {}",
+            src_path_display,
+            dest_path_str,
+            stderr,
+        );
     }
 
     async fn is_sftp_available() -> bool {
@@ -886,8 +895,12 @@ impl SshSocket {
     // into a machine. You must use `cd` to get back to $HOME.
     // You need to do it like this: $ ssh host "cd; sh -c 'ls -l /tmp'"
     fn ssh_command(&self, program: &str, args: &[impl AsRef<str>]) -> process::Command {
+        let shell_kind = ShellKind::Posix;
         let mut command = util::command::new_smol_command("ssh");
-        let mut to_run = shlex::try_quote(program).unwrap().into_owned();
+        let mut to_run = shell_kind
+            .try_quote(program)
+            .expect("shell quoting")
+            .into_owned();
         for arg in args {
             // We're trying to work with: sh, bash, zsh, fish, tcsh, ...?
             debug_assert!(
@@ -895,9 +908,10 @@ impl SshSocket {
                 "multiline arguments do not work in all shells"
             );
             to_run.push(' ');
-            to_run.push_str(&shlex::try_quote(arg.as_ref()).unwrap());
+            to_run.push_str(&shell_kind.try_quote(arg.as_ref()).expect("shell quoting"));
         }
-        let to_run = format!("cd; {to_run}");
+        let separator = shell_kind.sequential_commands_separator();
+        let to_run = format!("cd{separator} {to_run}");
         self.ssh_options(&mut command, true)
             .arg(self.connection_options.ssh_url())
             .arg("-T")
@@ -906,7 +920,7 @@ impl SshSocket {
         command
     }
 
-    async fn run_command(&self, program: &str, args: &[&str]) -> Result<String> {
+    async fn run_command(&self, program: &str, args: &[impl AsRef<str>]) -> Result<String> {
         let output = self.ssh_command(program, args).output().await?;
         anyhow::ensure!(
             output.status.success(),
@@ -1080,7 +1094,10 @@ impl SshConnectionOptions {
             "-w",
         ];
 
-        let mut tokens = shlex::split(input).context("invalid input")?.into_iter();
+        let mut tokens = ShellKind::Posix
+            .split(input)
+            .context("invalid input")?
+            .into_iter();
 
         'outer: while let Some(arg) = tokens.next() {
             if ALLOWED_OPTS.contains(&(&arg as &str)) {
@@ -1243,6 +1260,7 @@ fn build_command(
 ) -> Result<CommandTemplate> {
     use std::fmt::Write as _;
 
+    let shell_kind = ShellKind::new(ssh_shell, false);
     let mut exec = String::new();
     if let Some(working_dir) = working_dir {
         let working_dir = RemotePathBuf::new(working_dir, ssh_path_style).to_string();
@@ -1252,29 +1270,38 @@ fn build_command(
         const TILDE_PREFIX: &'static str = "~/";
         if working_dir.starts_with(TILDE_PREFIX) {
             let working_dir = working_dir.trim_start_matches("~").trim_start_matches("/");
-            write!(exec, "cd \"$HOME/{working_dir}\" && ",).unwrap();
+            write!(exec, "cd \"$HOME/{working_dir}\" && ",)?;
         } else {
-            write!(exec, "cd \"{working_dir}\" && ",).unwrap();
+            write!(exec, "cd \"{working_dir}\" && ",)?;
         }
     } else {
-        write!(exec, "cd && ").unwrap();
+        write!(exec, "cd && ")?;
     };
-    write!(exec, "exec env ").unwrap();
+    write!(exec, "exec env ")?;
 
     for (k, v) in input_env.iter() {
-        if let Some((k, v)) = shlex::try_quote(k).ok().zip(shlex::try_quote(v).ok()) {
-            write!(exec, "{}={} ", k, v).unwrap();
-        }
+        write!(
+            exec,
+            "{}={} ",
+            k,
+            shell_kind.try_quote(v).context("shell quoting")?
+        )?;
     }
 
     if let Some(input_program) = input_program {
-        write!(exec, "{}", shlex::try_quote(&input_program).unwrap()).unwrap();
+        write!(
+            exec,
+            "{}",
+            shell_kind
+                .try_quote(&input_program)
+                .context("shell quoting")?
+        )?;
         for arg in input_args {
-            let arg = shlex::try_quote(&arg)?;
-            write!(exec, " {}", &arg).unwrap();
+            let arg = shell_kind.try_quote(&arg).context("shell quoting")?;
+            write!(exec, " {}", &arg)?;
         }
     } else {
-        write!(exec, "{ssh_shell} -l").unwrap();
+        write!(exec, "{ssh_shell} -l")?;
     };
 
     let mut args = Vec::new();

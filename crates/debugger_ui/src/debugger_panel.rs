@@ -1806,6 +1806,7 @@ impl Render for DebugPanel {
                     this.child(
                         v_flex()
                             .size_full()
+                            .overflow_hidden()
                             .gap_1()
                             .items_center()
                             .justify_center()

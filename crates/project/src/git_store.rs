@@ -1,3 +1,4 @@
+pub mod branch_diff;
 mod conflict_set;
 pub mod git_traversal;
 
@@ -30,7 +31,8 @@ use git::{
     },
     stash::{GitStash, StashEntry},
     status::{
-        FileStatus, GitSummary, StatusCode, TrackedStatus, UnmergedStatus, UnmergedStatusCode,
+        DiffTreeType, FileStatus, GitSummary, StatusCode, TrackedStatus, TreeDiff, TreeDiffStatus,
+        UnmergedStatus, UnmergedStatusCode,
     },
 };
 use gpui::{
@@ -55,6 +57,7 @@ use std::{
     mem,
     ops::Range,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{
         Arc,
         atomic::{self, AtomicU64},
@@ -432,6 +435,8 @@ impl GitStore {
         client.add_entity_request_handler(Self::handle_askpass);
         client.add_entity_request_handler(Self::handle_check_for_pushed_commits);
         client.add_entity_request_handler(Self::handle_git_diff);
+        client.add_entity_request_handler(Self::handle_tree_diff);
+        client.add_entity_request_handler(Self::handle_get_blob_content);
         client.add_entity_request_handler(Self::handle_open_unstaged_diff);
         client.add_entity_request_handler(Self::handle_open_uncommitted_diff);
         client.add_entity_message_handler(Self::handle_update_diff_bases);
@@ -619,6 +624,52 @@ impl GitStore {
         cx.background_spawn(async move { task.await.map_err(|e| anyhow!("{e}")) })
     }
 
+    pub fn open_diff_since(
+        &mut self,
+        oid: Option<git::Oid>,
+        buffer: Entity<Buffer>,
+        repo: Entity<Repository>,
+        languages: Arc<LanguageRegistry>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<BufferDiff>>> {
+        cx.spawn(async move |this, cx| {
+            let buffer_snapshot = buffer.update(cx, |buffer, _| buffer.snapshot())?;
+            let content = match oid {
+                None => None,
+                Some(oid) => Some(
+                    repo.update(cx, |repo, cx| repo.load_blob_content(oid, cx))?
+                        .await?,
+                ),
+            };
+            let buffer_diff = cx.new(|cx| BufferDiff::new(&buffer_snapshot, cx))?;
+
+            buffer_diff
+                .update(cx, |buffer_diff, cx| {
+                    buffer_diff.set_base_text(
+                        content.map(Arc::new),
+                        buffer_snapshot.language().cloned(),
+                        Some(languages.clone()),
+                        buffer_snapshot.text,
+                        cx,
+                    )
+                })?
+                .await?;
+            let unstaged_diff = this
+                .update(cx, |this, cx| this.open_unstaged_diff(buffer.clone(), cx))?
+                .await?;
+            buffer_diff.update(cx, |buffer_diff, _| {
+                buffer_diff.set_secondary_diff(unstaged_diff);
+            })?;
+
+            this.update(cx, |_, cx| {
+                cx.subscribe(&buffer_diff, Self::on_buffer_diff_event)
+                    .detach();
+            })?;
+
+            Ok(buffer_diff)
+        })
+    }
+
     pub fn open_uncommitted_diff(
         &mut self,
         buffer: Entity<Buffer>,
@@ -658,6 +709,7 @@ impl GitStore {
                     repo.load_committed_text(buffer_id, repo_path, cx)
                 });
 
+                // todo(lw): hot foreground spawn
                 cx.spawn(async move |this, cx| {
                     Self::open_diff_internal(this, DiffKind::Uncommitted, changes.await, buffer, cx)
                         .await
@@ -2168,6 +2220,75 @@ impl GitStore {
         Ok(proto::GitDiffResponse { diff })
     }
 
+    async fn handle_tree_diff(
+        this: Entity<Self>,
+        request: TypedEnvelope<proto::GetTreeDiff>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GetTreeDiffResponse> {
+        let repository_id = RepositoryId(request.payload.repository_id);
+        let diff_type = if request.payload.is_merge {
+            DiffTreeType::MergeBase {
+                base: request.payload.base.into(),
+                head: request.payload.head.into(),
+            }
+        } else {
+            DiffTreeType::Since {
+                base: request.payload.base.into(),
+                head: request.payload.head.into(),
+            }
+        };
+
+        let diff = this
+            .update(&mut cx, |this, cx| {
+                let repository = this.repositories().get(&repository_id)?;
+                Some(repository.update(cx, |repo, cx| repo.diff_tree(diff_type, cx)))
+            })?
+            .context("missing repository")?
+            .await??;
+
+        Ok(proto::GetTreeDiffResponse {
+            entries: diff
+                .entries
+                .into_iter()
+                .map(|(path, status)| proto::TreeDiffStatus {
+                    path: path.0.to_proto(),
+                    status: match status {
+                        TreeDiffStatus::Added {} => proto::tree_diff_status::Status::Added.into(),
+                        TreeDiffStatus::Modified { .. } => {
+                            proto::tree_diff_status::Status::Modified.into()
+                        }
+                        TreeDiffStatus::Deleted { .. } => {
+                            proto::tree_diff_status::Status::Deleted.into()
+                        }
+                    },
+                    oid: match status {
+                        TreeDiffStatus::Deleted { old } | TreeDiffStatus::Modified { old } => {
+                            Some(old.to_string())
+                        }
+                        TreeDiffStatus::Added => None,
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    async fn handle_get_blob_content(
+        this: Entity<Self>,
+        request: TypedEnvelope<proto::GetBlobContent>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::GetBlobContentResponse> {
+        let oid = git::Oid::from_str(&request.payload.oid)?;
+        let repository_id = RepositoryId(request.payload.repository_id);
+        let content = this
+            .update(&mut cx, |this, cx| {
+                let repository = this.repositories().get(&repository_id)?;
+                Some(repository.update(cx, |repo, cx| repo.load_blob_content(oid, cx)))
+            })?
+            .context("missing repository")?
+            .await?;
+        Ok(proto::GetBlobContentResponse { content })
+    }
+
     async fn handle_open_unstaged_diff(
         this: Entity<Self>,
         request: TypedEnvelope<proto::OpenUnstagedDiff>,
@@ -3596,20 +3717,15 @@ impl Repository {
         Some(self.git_store.upgrade()?.read(cx).buffer_store.clone())
     }
 
-    pub fn stage_entries(
+    fn save_buffers<'a>(
         &self,
-        entries: Vec<RepoPath>,
+        entries: impl IntoIterator<Item = &'a RepoPath>,
         cx: &mut Context<Self>,
-    ) -> Task<anyhow::Result<()>> {
-        if entries.is_empty() {
-            return Task::ready(Ok(()));
-        }
-        let id = self.id;
-
+    ) -> Vec<Task<anyhow::Result<()>>> {
         let mut save_futures = Vec::new();
         if let Some(buffer_store) = self.buffer_store(cx) {
             buffer_store.update(cx, |buffer_store, cx| {
-                for path in &entries {
+                for path in entries {
                     let Some(project_path) = self.repo_path_to_project_path(path, cx) else {
                         continue;
                     };
@@ -3625,37 +3741,64 @@ impl Repository {
                 }
             })
         }
+        save_futures
+    }
+
+    pub fn stage_entries(
+        &self,
+        entries: Vec<RepoPath>,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        if entries.is_empty() {
+            return Task::ready(Ok(()));
+        }
+        let id = self.id;
+        let save_tasks = self.save_buffers(&entries, cx);
+        let paths = entries
+            .iter()
+            .map(|p| p.as_unix_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let status = format!("git add {paths}");
+        let job_key = match entries.len() {
+            1 => Some(GitJobKey::WriteIndex(entries[0].clone())),
+            _ => None,
+        };
 
         cx.spawn(async move |this, cx| {
-            for save_future in save_futures {
-                save_future.await?;
+            for save_task in save_tasks {
+                save_task.await?;
             }
 
             this.update(cx, |this, _| {
-                this.send_job(None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local {
-                            backend,
-                            environment,
-                            ..
-                        } => backend.stage_paths(entries, environment.clone()).await,
-                        RepositoryState::Remote { project_id, client } => {
-                            client
-                                .request(proto::Stage {
-                                    project_id: project_id.0,
-                                    repository_id: id.to_proto(),
-                                    paths: entries
-                                        .into_iter()
-                                        .map(|repo_path| repo_path.to_proto())
-                                        .collect(),
-                                })
-                                .await
-                                .context("sending stage request")?;
+                this.send_keyed_job(
+                    job_key,
+                    Some(status.into()),
+                    move |git_repo, _cx| async move {
+                        match git_repo {
+                            RepositoryState::Local {
+                                backend,
+                                environment,
+                                ..
+                            } => backend.stage_paths(entries, environment.clone()).await,
+                            RepositoryState::Remote { project_id, client } => {
+                                client
+                                    .request(proto::Stage {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        paths: entries
+                                            .into_iter()
+                                            .map(|repo_path| repo_path.to_proto())
+                                            .collect(),
+                                    })
+                                    .await
+                                    .context("sending stage request")?;
 
-                            Ok(())
+                                Ok(())
+                            }
                         }
-                    }
-                })
+                    },
+                )
             })?
             .await??;
 
@@ -3672,57 +3815,52 @@ impl Repository {
             return Task::ready(Ok(()));
         }
         let id = self.id;
-
-        let mut save_futures = Vec::new();
-        if let Some(buffer_store) = self.buffer_store(cx) {
-            buffer_store.update(cx, |buffer_store, cx| {
-                for path in &entries {
-                    let Some(project_path) = self.repo_path_to_project_path(path, cx) else {
-                        continue;
-                    };
-                    if let Some(buffer) = buffer_store.get_by_path(&project_path)
-                        && buffer
-                            .read(cx)
-                            .file()
-                            .is_some_and(|file| file.disk_state().exists())
-                        && buffer.read(cx).has_unsaved_edits()
-                    {
-                        save_futures.push(buffer_store.save_buffer(buffer, cx));
-                    }
-                }
-            })
-        }
+        let save_tasks = self.save_buffers(&entries, cx);
+        let paths = entries
+            .iter()
+            .map(|p| p.as_unix_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let status = format!("git reset {paths}");
+        let job_key = match entries.len() {
+            1 => Some(GitJobKey::WriteIndex(entries[0].clone())),
+            _ => None,
+        };
 
         cx.spawn(async move |this, cx| {
-            for save_future in save_futures {
-                save_future.await?;
+            for save_task in save_tasks {
+                save_task.await?;
             }
 
             this.update(cx, |this, _| {
-                this.send_job(None, move |git_repo, _cx| async move {
-                    match git_repo {
-                        RepositoryState::Local {
-                            backend,
-                            environment,
-                            ..
-                        } => backend.unstage_paths(entries, environment).await,
-                        RepositoryState::Remote { project_id, client } => {
-                            client
-                                .request(proto::Unstage {
-                                    project_id: project_id.0,
-                                    repository_id: id.to_proto(),
-                                    paths: entries
-                                        .into_iter()
-                                        .map(|repo_path| repo_path.to_proto())
-                                        .collect(),
-                                })
-                                .await
-                                .context("sending unstage request")?;
+                this.send_keyed_job(
+                    job_key,
+                    Some(status.into()),
+                    move |git_repo, _cx| async move {
+                        match git_repo {
+                            RepositoryState::Local {
+                                backend,
+                                environment,
+                                ..
+                            } => backend.unstage_paths(entries, environment).await,
+                            RepositoryState::Remote { project_id, client } => {
+                                client
+                                    .request(proto::Unstage {
+                                        project_id: project_id.0,
+                                        repository_id: id.to_proto(),
+                                        paths: entries
+                                            .into_iter()
+                                            .map(|repo_path| repo_path.to_proto())
+                                            .collect(),
+                                    })
+                                    .await
+                                    .context("sending unstage request")?;
 
-                            Ok(())
+                                Ok(())
+                            }
                         }
-                    }
-                })
+                    },
+                )
             })?
             .await??;
 
@@ -4303,6 +4441,62 @@ impl Repository {
         })
     }
 
+    pub fn diff_tree(
+        &mut self,
+        diff_type: DiffTreeType,
+        _cx: &App,
+    ) -> oneshot::Receiver<Result<TreeDiff>> {
+        let repository_id = self.snapshot.id;
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local { backend, .. } => backend.diff_tree(diff_type).await,
+                RepositoryState::Remote { client, project_id } => {
+                    let response = client
+                        .request(proto::GetTreeDiff {
+                            project_id: project_id.0,
+                            repository_id: repository_id.0,
+                            is_merge: matches!(diff_type, DiffTreeType::MergeBase { .. }),
+                            base: diff_type.base().to_string(),
+                            head: diff_type.head().to_string(),
+                        })
+                        .await?;
+
+                    let entries = response
+                        .entries
+                        .into_iter()
+                        .filter_map(|entry| {
+                            let status = match entry.status() {
+                                proto::tree_diff_status::Status::Added => TreeDiffStatus::Added,
+                                proto::tree_diff_status::Status::Modified => {
+                                    TreeDiffStatus::Modified {
+                                        old: git::Oid::from_str(
+                                            &entry.oid.context("missing oid").log_err()?,
+                                        )
+                                        .log_err()?,
+                                    }
+                                }
+                                proto::tree_diff_status::Status::Deleted => {
+                                    TreeDiffStatus::Deleted {
+                                        old: git::Oid::from_str(
+                                            &entry.oid.context("missing oid").log_err()?,
+                                        )
+                                        .log_err()?,
+                                    }
+                                }
+                            };
+                            Some((
+                                RepoPath(RelPath::from_proto(&entry.path).log_err()?),
+                                status,
+                            ))
+                        })
+                        .collect();
+
+                    Ok(TreeDiff { entries })
+                }
+            }
+        })
+    }
+
     pub fn diff(&mut self, diff_type: DiffType, _cx: &App) -> oneshot::Receiver<Result<String>> {
         let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
@@ -4773,6 +4967,25 @@ impl Repository {
             }
         });
 
+        cx.spawn(|_: &mut AsyncApp| async move { rx.await? })
+    }
+    fn load_blob_content(&mut self, oid: Oid, cx: &App) -> Task<Result<String>> {
+        let repository_id = self.snapshot.id;
+        let rx = self.send_job(None, move |state, _| async move {
+            match state {
+                RepositoryState::Local { backend, .. } => backend.load_blob_content(oid).await,
+                RepositoryState::Remote { client, project_id } => {
+                    let response = client
+                        .request(proto::GetBlobContent {
+                            project_id: project_id.to_proto(),
+                            repository_id: repository_id.0,
+                            oid: oid.to_string(),
+                        })
+                        .await?;
+                    Ok(response.content)
+                }
+            }
+        });
         cx.spawn(|_: &mut AsyncApp| async move { rx.await? })
     }
 
