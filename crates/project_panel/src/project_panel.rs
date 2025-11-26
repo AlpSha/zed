@@ -7,7 +7,7 @@ use collections::{BTreeSet, HashMap, hash_map};
 use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KEY_VALUE_STORE;
 use editor::{
-    Editor, EditorEvent,
+    Editor, EditorEvent, MultiBufferOffset,
     items::{
         entry_diagnostic_aware_icon_decoration_and_color,
         entry_diagnostic_aware_icon_name_and_color, entry_git_aware_label_color,
@@ -67,7 +67,7 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotifyResultExt, NotifyTaskExt},
 };
 use worktree::CreatedEntry;
-use zed_actions::workspace::OpenWithSystem;
+use zed_actions::{project_panel::ToggleFocus, workspace::OpenWithSystem};
 
 const PROJECT_PANEL_KEY: &str = "ProjectPanel";
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
@@ -306,8 +306,6 @@ actions!(
         OpenSplitVertical,
         /// Opens the selected file in a horizontal split.
         OpenSplitHorizontal,
-        /// Toggles focus on the project panel.
-        ToggleFocus,
         /// Toggles visibility of git-ignored files.
         ToggleHideGitIgnore,
         /// Toggles visibility of hidden files.
@@ -1927,7 +1925,9 @@ impl ProjectPanel {
                 self.filename_editor.update(cx, |editor, cx| {
                     editor.set_text(file_name, window, cx);
                     editor.change_selections(Default::default(), window, cx, |s| {
-                        s.select_ranges([selection])
+                        s.select_ranges([
+                            MultiBufferOffset(selection.start)..MultiBufferOffset(selection.end)
+                        ])
                     });
                 });
                 self.update_visible_entries(None, true, true, window, cx);
@@ -4837,7 +4837,7 @@ impl ProjectPanel {
                                         .collect::<Vec<_>>();
                                     let active_index = folded_ancestors.active_index();
                                     let components_len = components.len();
-                                    let delimiter = SharedString::new(path_style.separator());
+                                    let delimiter = SharedString::new(path_style.primary_separator());
                                     for (index, component) in components.iter().enumerate() {
                                         if index != 0 {
                                                 let delimiter_target_index = index - 1;
@@ -5765,7 +5765,7 @@ impl Render for ProjectPanel {
                                 ListHorizontalSizingBehavior::Unconstrained,
                             )
                             .with_width_from_item(self.state.max_width_item_index)
-                            .track_scroll(self.scroll_handle.clone()),
+                            .track_scroll(&self.scroll_handle),
                         )
                         .child(
                             div()
@@ -5908,7 +5908,7 @@ impl Render for ProjectPanel {
                 )
                 .custom_scrollbars(
                     Scrollbars::for_settings::<ProjectPanelSettings>()
-                        .tracked_scroll_handle(self.scroll_handle.clone())
+                        .tracked_scroll_handle(&self.scroll_handle)
                         .with_track_along(
                             ScrollAxes::Horizontal,
                             cx.theme().colors().panel_background,
