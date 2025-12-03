@@ -36,6 +36,7 @@ mod persistence;
 mod rust_analyzer_ext;
 pub mod scroll;
 mod selections_collection;
+mod split;
 pub mod tasks;
 
 #[cfg(test)]
@@ -69,6 +70,7 @@ pub use multi_buffer::{
     MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
     ToPoint,
 };
+pub use split::SplittableEditor;
 pub use text::Bias;
 
 use ::git::{
@@ -144,8 +146,8 @@ use persistence::DB;
 use project::{
     BreakpointWithPosition, CodeAction, Completion, CompletionDisplayOptions, CompletionIntent,
     CompletionResponse, CompletionSource, DisableAiSettings, DocumentHighlight, InlayHint, InlayId,
-    InvalidationStrategy, Location, LocationLink, PrepareRenameResponse, Project, ProjectItem,
-    ProjectPath, ProjectTransaction, TaskSourceKind,
+    InvalidationStrategy, Location, LocationLink, LspAction, PrepareRenameResponse, Project,
+    ProjectItem, ProjectPath, ProjectTransaction, TaskSourceKind,
     debugger::{
         breakpoint_store::{
             Breakpoint, BreakpointEditAction, BreakpointSessionState, BreakpointState,
@@ -282,6 +284,9 @@ pub enum ConflictsTheirs {}
 pub enum ConflictsOursMarker {}
 pub enum ConflictsTheirsMarker {}
 
+pub struct HunkAddedColor;
+pub struct HunkRemovedColor;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Navigated {
     Yes,
@@ -305,6 +310,7 @@ enum DisplayDiffHunk {
         display_row_range: Range<DisplayRow>,
         multi_buffer_range: Range<Anchor>,
         status: DiffHunkStatus,
+        word_diffs: Vec<Range<MultiBufferOffset>>,
     },
 }
 
@@ -1166,6 +1172,7 @@ pub struct Editor {
     gutter_breakpoint_indicator: (Option<PhantomBreakpointIndicator>, Option<Task<()>>),
     hovered_diff_hunk_row: Option<DisplayRow>,
     pull_diagnostics_task: Task<()>,
+    pull_diagnostics_background_task: Task<()>,
     in_project_search: bool,
     previous_search_ranges: Option<Arc<[Range<Anchor>]>>,
     breadcrumb_header: Option<String>,
@@ -1198,6 +1205,7 @@ pub struct Editor {
     applicable_language_settings: HashMap<Option<LanguageName>, LanguageSettings>,
     accent_overrides: Vec<SharedString>,
     fetched_tree_sitter_chunks: HashMap<ExcerptId, HashSet<Range<BufferRow>>>,
+    use_base_text_line_numbers: bool,
 }
 
 fn debounce_value(debounce_ms: u64) -> Option<Duration> {
@@ -1637,7 +1645,7 @@ pub(crate) struct FocusedBlock {
     focus_handle: WeakFocusHandle,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum JumpData {
     MultiBufferRow {
         row: MultiBufferRow,
@@ -2309,6 +2317,7 @@ impl Editor {
                 .unwrap_or_default(),
             tasks_update_task: None,
             pull_diagnostics_task: Task::ready(()),
+            pull_diagnostics_background_task: Task::ready(()),
             colors: None,
             refresh_colors_task: Task::ready(()),
             inlay_hints: None,
@@ -2344,6 +2353,7 @@ impl Editor {
             applicable_language_settings: HashMap::default(),
             accent_overrides: Vec::new(),
             fetched_tree_sitter_chunks: HashMap::default(),
+            use_base_text_line_numbers: false,
         };
 
         if is_minimap {
@@ -2484,7 +2494,6 @@ impl Editor {
             if let Some(buffer) = multi_buffer.read(cx).as_singleton() {
                 editor.register_buffer(buffer.read(cx).remote_id(), cx);
             }
-            editor.update_lsp_data(None, window, cx);
             editor.report_editor_event(ReportEditorEvent::EditorOpened, None, cx);
         }
 
@@ -5304,12 +5313,10 @@ impl Editor {
 
     pub fn visible_excerpts(
         &self,
+        lsp_related_only: bool,
         cx: &mut Context<Editor>,
     ) -> HashMap<ExcerptId, (Entity<Buffer>, clock::Global, Range<usize>)> {
-        let Some(project) = self.project() else {
-            return HashMap::default();
-        };
-        let project = project.read(cx);
+        let project = self.project().cloned();
         let multi_buffer = self.buffer().read(cx);
         let multi_buffer_snapshot = multi_buffer.snapshot(cx);
         let multi_buffer_visible_start = self
@@ -5327,6 +5334,18 @@ impl Editor {
             .into_iter()
             .filter(|(_, excerpt_visible_range, _)| !excerpt_visible_range.is_empty())
             .filter_map(|(buffer, excerpt_visible_range, excerpt_id)| {
+                if !lsp_related_only {
+                    return Some((
+                        excerpt_id,
+                        (
+                            multi_buffer.buffer(buffer.remote_id()).unwrap(),
+                            buffer.version().clone(),
+                            excerpt_visible_range.start.0..excerpt_visible_range.end.0,
+                        ),
+                    ));
+                }
+
+                let project = project.as_ref()?.read(cx);
                 let buffer_file = project::File::from_dyn(buffer.file())?;
                 let buffer_worktree = project.worktree_for_id(buffer_file.worktree_id(cx), cx)?;
                 let worktree_entry = buffer_worktree
@@ -5491,6 +5510,22 @@ impl Editor {
         };
         let buffer_snapshot = buffer.read(cx).snapshot();
 
+        let menu_is_open = matches!(
+            self.context_menu.borrow().as_ref(),
+            Some(CodeContextMenu::Completions(_))
+        );
+
+        let language = buffer_snapshot
+            .language_at(buffer_position.text_anchor)
+            .map(|language| language.name());
+
+        let language_settings = language_settings(language.clone(), buffer_snapshot.file(), cx);
+        let completion_settings = language_settings.completions.clone();
+
+        if !menu_is_open && trigger.is_some() && !language_settings.show_completions_on_input {
+            return;
+        }
+
         let query: Option<Arc<String>> =
             Self::completion_query(&multibuffer_snapshot, buffer_position)
                 .map(|query| query.into());
@@ -5499,14 +5534,8 @@ impl Editor {
 
         // Hide the current completions menu when query is empty. Without this, cached
         // completions from before the trigger char may be reused (#32774).
-        if query.is_none() {
-            let menu_is_open = matches!(
-                self.context_menu.borrow().as_ref(),
-                Some(CodeContextMenu::Completions(_))
-            );
-            if menu_is_open {
-                self.hide_context_menu(window, cx);
-            }
+        if query.is_none() && menu_is_open {
+            self.hide_context_menu(window, cx);
         }
 
         let mut ignore_word_threshold = false;
@@ -5595,14 +5624,6 @@ impl Editor {
             (buffer_position..buffer_position, None)
         };
 
-        let language = buffer_snapshot
-            .language_at(buffer_position)
-            .map(|language| language.name());
-
-        let completion_settings = language_settings(language.clone(), buffer_snapshot.file(), cx)
-            .completions
-            .clone();
-
         let show_completion_documentation = buffer_snapshot
             .settings_at(buffer_position, cx)
             .show_completion_documentation;
@@ -5633,7 +5654,6 @@ impl Editor {
                     position.text_anchor,
                     trigger,
                     trigger_in_words,
-                    completions_source.is_some(),
                     cx,
                 )
             })
@@ -6133,9 +6153,43 @@ impl Editor {
         }
 
         let provider = self.completion_provider.as_ref()?;
+
+        let lsp_store = self.project().map(|project| project.read(cx).lsp_store());
+        let command = lsp_store.as_ref().and_then(|lsp_store| {
+            let CompletionSource::Lsp {
+                lsp_completion,
+                server_id,
+                ..
+            } = &completion.source
+            else {
+                return None;
+            };
+            let lsp_command = lsp_completion.command.as_ref()?;
+            let available_commands = lsp_store
+                .read(cx)
+                .lsp_server_capabilities
+                .get(server_id)
+                .and_then(|server_capabilities| {
+                    server_capabilities
+                        .execute_command_provider
+                        .as_ref()
+                        .map(|options| options.commands.as_slice())
+                })?;
+            if available_commands.contains(&lsp_command.command) {
+                Some(CodeAction {
+                    server_id: *server_id,
+                    range: language::Anchor::MIN..language::Anchor::MIN,
+                    lsp_action: LspAction::Command(lsp_command.clone()),
+                    resolved: false,
+                })
+            } else {
+                None
+            }
+        });
+
         drop(completion);
         let apply_edits = provider.apply_additional_edits_for_completion(
-            buffer_handle,
+            buffer_handle.clone(),
             completions_menu.completions.clone(),
             candidate_id,
             true,
@@ -6149,8 +6203,29 @@ impl Editor {
             self.show_signature_help(&ShowSignatureHelp, window, cx);
         }
 
-        Some(cx.foreground_executor().spawn(async move {
+        Some(cx.spawn_in(window, async move |editor, cx| {
             apply_edits.await?;
+
+            if let Some((lsp_store, command)) = lsp_store.zip(command) {
+                let title = command.lsp_action.title().to_owned();
+                let project_transaction = lsp_store
+                    .update(cx, |lsp_store, cx| {
+                        lsp_store.apply_code_action(buffer_handle, command, false, cx)
+                    })?
+                    .await
+                    .context("applying post-completion command")?;
+                if let Some(workspace) = editor.read_with(cx, |editor, _| editor.workspace())? {
+                    Self::open_project_transaction(
+                        &editor,
+                        workspace.downgrade(),
+                        project_transaction,
+                        title,
+                        cx,
+                    )
+                    .await?;
+                }
+            }
+
             Ok(())
         }))
     }
@@ -6736,6 +6811,9 @@ impl Editor {
             return;
         };
 
+        if self.blame.is_none() {
+            self.start_git_blame(true, window, cx);
+        }
         let Some(blame) = self.blame.as_ref() else {
             return;
         };
@@ -8420,8 +8498,14 @@ impl Editor {
                 (true, true) => ui::IconName::DebugDisabledLogBreakpoint,
             };
 
+            let color = cx.theme().colors();
+
             let color = if is_phantom {
-                Color::Hint
+                if collides_with_existing {
+                    Color::Custom(color.debugger_accent.blend(color.text.opacity(0.6)))
+                } else {
+                    Color::Hint
+                }
             } else if is_rejected {
                 Color::Disabled
             } else {
@@ -18317,54 +18401,101 @@ impl Editor {
             return None;
         }
         let project = self.project()?.downgrade();
-        let debounce = Duration::from_millis(pull_diagnostics_settings.debounce_ms);
-        let mut buffers = self.buffer.read(cx).all_buffers();
-        buffers.retain(|buffer| {
-            let buffer_id_to_retain = buffer.read(cx).remote_id();
-            buffer_id.is_none_or(|buffer_id| buffer_id == buffer_id_to_retain)
-                && self.registered_buffers.contains_key(&buffer_id_to_retain)
-        });
-        if buffers.is_empty() {
+
+        let mut edited_buffer_ids = HashSet::default();
+        let mut edited_worktree_ids = HashSet::default();
+        let edited_buffers = match buffer_id {
+            Some(buffer_id) => {
+                let buffer = self.buffer().read(cx).buffer(buffer_id)?;
+                let worktree_id = buffer.read(cx).file().map(|f| f.worktree_id(cx))?;
+                edited_buffer_ids.insert(buffer.read(cx).remote_id());
+                edited_worktree_ids.insert(worktree_id);
+                vec![buffer]
+            }
+            None => self
+                .buffer()
+                .read(cx)
+                .all_buffers()
+                .into_iter()
+                .filter(|buffer| {
+                    let buffer = buffer.read(cx);
+                    match buffer.file().map(|f| f.worktree_id(cx)) {
+                        Some(worktree_id) => {
+                            edited_buffer_ids.insert(buffer.remote_id());
+                            edited_worktree_ids.insert(worktree_id);
+                            true
+                        }
+                        None => false,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        };
+
+        if edited_buffers.is_empty() {
             self.pull_diagnostics_task = Task::ready(());
+            self.pull_diagnostics_background_task = Task::ready(());
             return None;
         }
 
-        self.pull_diagnostics_task = cx.spawn_in(window, async move |editor, cx| {
-            cx.background_executor().timer(debounce).await;
-
-            let Ok(mut pull_diagnostics_tasks) = cx.update(|_, cx| {
-                buffers
-                    .into_iter()
-                    .filter_map(|buffer| {
-                        project
-                            .update(cx, |project, cx| {
-                                project.lsp_store().update(cx, |lsp_store, cx| {
-                                    lsp_store.pull_diagnostics_for_buffer(buffer, cx)
-                                })
-                            })
-                            .ok()
-                    })
-                    .collect::<FuturesUnordered<_>>()
-            }) else {
-                return;
-            };
-
-            while let Some(pull_task) = pull_diagnostics_tasks.next().await {
-                match pull_task {
-                    Ok(()) => {
-                        if editor
-                            .update_in(cx, |editor, window, cx| {
-                                editor.update_diagnostics_state(window, cx);
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+        let mut already_used_buffers = HashSet::default();
+        let related_open_buffers = self
+            .workspace
+            .as_ref()
+            .and_then(|(workspace, _)| workspace.upgrade())
+            .into_iter()
+            .flat_map(|workspace| workspace.read(cx).panes())
+            .flat_map(|pane| pane.read(cx).items_of_type::<Editor>())
+            .filter(|editor| editor != &cx.entity())
+            .flat_map(|editor| editor.read(cx).buffer().read(cx).all_buffers())
+            .filter(|buffer| {
+                let buffer = buffer.read(cx);
+                let buffer_id = buffer.remote_id();
+                if already_used_buffers.insert(buffer_id) {
+                    if let Some(worktree_id) = buffer.file().map(|f| f.worktree_id(cx)) {
+                        return !edited_buffer_ids.contains(&buffer_id)
+                            && !edited_worktree_ids.contains(&worktree_id);
                     }
-                    Err(e) => log::error!("Failed to update project diagnostics: {e:#}"),
                 }
+                false
+            })
+            .collect::<Vec<_>>();
+
+        let debounce = Duration::from_millis(pull_diagnostics_settings.debounce_ms);
+        let make_spawn = |buffers: Vec<Entity<Buffer>>, delay: Duration| {
+            if buffers.is_empty() {
+                return Task::ready(());
             }
-        });
+            let project_weak = project.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                cx.background_executor().timer(delay).await;
+
+                let Ok(mut pull_diagnostics_tasks) = cx.update(|_, cx| {
+                    buffers
+                        .into_iter()
+                        .filter_map(|buffer| {
+                            project_weak
+                                .update(cx, |project, cx| {
+                                    project.lsp_store().update(cx, |lsp_store, cx| {
+                                        lsp_store.pull_diagnostics_for_buffer(buffer, cx)
+                                    })
+                                })
+                                .ok()
+                        })
+                        .collect::<FuturesUnordered<_>>()
+                }) else {
+                    return;
+                };
+
+                while let Some(pull_task) = pull_diagnostics_tasks.next().await {
+                    if let Err(e) = pull_task {
+                        log::error!("Failed to update project diagnostics: {e:#}");
+                    }
+                }
+            })
+        };
+
+        self.pull_diagnostics_task = make_spawn(edited_buffers, debounce);
+        self.pull_diagnostics_background_task = make_spawn(related_open_buffers, debounce * 2);
 
         Some(())
     }
@@ -19198,6 +19329,10 @@ impl Editor {
         self.display_map.read(cx).fold_placeholder.clone()
     }
 
+    pub fn set_use_base_text_line_numbers(&mut self, show: bool, _cx: &mut Context<Self>) {
+        self.use_base_text_line_numbers = show;
+    }
+
     pub fn set_expand_all_diff_hunks(&mut self, cx: &mut App) {
         self.buffer.update(cx, |buffer, cx| {
             buffer.set_all_diff_hunks_expanded(cx);
@@ -19433,6 +19568,10 @@ impl Editor {
                 &hunks
                     .map(|hunk| buffer_diff::DiffHunk {
                         buffer_range: hunk.buffer_range,
+                        // We don't need to pass in word diffs here because they're only used for rendering and
+                        // this function changes internal state
+                        base_word_diffs: Vec::default(),
+                        buffer_word_diffs: Vec::default(),
                         diff_base_byte_range: hunk.diff_base_byte_range.start.0
                             ..hunk.diff_base_byte_range.end.0,
                         secondary_status: hunk.secondary_status,
@@ -21565,12 +21704,22 @@ impl Editor {
             return Vec::new();
         }
 
-        theme::ThemeSettings::get_global(cx)
+        let theme_settings = theme::ThemeSettings::get_global(cx);
+
+        theme_settings
             .theme_overrides
             .get(cx.theme().name.as_ref())
             .map(|theme_style| &theme_style.accents)
             .into_iter()
             .flatten()
+            .chain(
+                theme_settings
+                    .experimental_theme_overrides
+                    .as_ref()
+                    .map(|overrides| &overrides.accents)
+                    .into_iter()
+                    .flatten(),
+            )
             .flat_map(|accent| accent.0.clone())
             .collect()
     }
@@ -21838,10 +21987,17 @@ impl Editor {
                 };
 
                 for (buffer, (ranges, scroll_offset)) in new_selections_by_buffer {
-                    let editor = buffer
-                        .read(cx)
-                        .file()
-                        .is_none()
+                    let buffer_read = buffer.read(cx);
+                    let (has_file, is_project_file) = if let Some(file) = buffer_read.file() {
+                        (true, project::File::from_dyn(Some(file)).is_some())
+                    } else {
+                        (false, false)
+                    };
+
+                    // If project file is none workspace.open_project_item will fail to open the excerpt
+                    // in a pre existing workspace item if one exists, because Buffer entity_id will be None
+                    // so we check if there's a tab match in that case first
+                    let editor = (!has_file || !is_project_file)
                         .then(|| {
                             // Handle file-less buffers separately: those are not really the project items, so won't have a project path or entity id,
                             // so `workspace.open_project_item` will never find them, always opening a new editor.
@@ -21875,6 +22031,9 @@ impl Editor {
                         });
 
                     editor.update(cx, |editor, cx| {
+                        if has_file && !is_project_file {
+                            editor.set_read_only(true);
+                        }
                         let autoscroll = match scroll_offset {
                             Some(scroll_offset) => Autoscroll::top_relative(scroll_offset as usize),
                             None => Autoscroll::newest(),
@@ -21898,10 +22057,11 @@ impl Editor {
         });
     }
 
-    // For now, don't allow opening excerpts in buffers that aren't backed by
-    // regular project files.
+    // Allow opening excerpts for buffers that either belong to the current project
+    // or represent synthetic/non-local files (e.g., git blobs). File-less buffers
+    // are also supported so tests and other in-memory views keep working.
     fn can_open_excerpts_in_file(file: Option<&Arc<dyn language::File>>) -> bool {
-        file.is_none_or(|file| project::File::from_dyn(Some(file)).is_some())
+        file.is_none_or(|file| project::File::from_dyn(Some(file)).is_some() || !file.is_local())
     }
 
     fn marked_text_ranges(&self, cx: &App) -> Option<Vec<Range<MultiBufferOffsetUtf16>>> {
@@ -22500,6 +22660,10 @@ impl Editor {
         }
     }
 
+    pub fn last_gutter_dimensions(&self) -> &GutterDimensions {
+        &self.gutter_dimensions
+    }
+
     pub fn wait_for_diff_to_load(&self) -> Option<Shared<Task<()>>> {
         self.load_diff_task.clone()
     }
@@ -22568,7 +22732,7 @@ impl Editor {
         if self.ignore_lsp_data() {
             return;
         }
-        for (_, (visible_buffer, _, _)) in self.visible_excerpts(cx) {
+        for (_, (visible_buffer, _, _)) in self.visible_excerpts(true, cx) {
             self.register_buffer(visible_buffer.read(cx).remote_id(), cx);
         }
     }
@@ -23389,7 +23553,6 @@ pub trait CompletionProvider {
         position: language::Anchor,
         text: &str,
         trigger_in_words: bool,
-        menu_is_open: bool,
         cx: &mut Context<Editor>,
     ) -> bool;
 
@@ -23768,7 +23931,6 @@ impl CompletionProvider for Entity<Project> {
         position: language::Anchor,
         text: &str,
         trigger_in_words: bool,
-        menu_is_open: bool,
         cx: &mut Context<Editor>,
     ) -> bool {
         let mut chars = text.chars();
@@ -23783,9 +23945,6 @@ impl CompletionProvider for Entity<Project> {
 
         let buffer = buffer.read(cx);
         let snapshot = buffer.snapshot();
-        if !menu_is_open && !snapshot.settings_at(position, cx).show_completions_on_input {
-            return false;
-        }
         let classifier = snapshot
             .char_classifier_at(position)
             .scope_context(Some(CharScopeContext::Completion));
@@ -24092,10 +24251,12 @@ impl EditorSnapshot {
                         end_row.0 += 1;
                     }
                     let is_created_file = hunk.is_created_file();
+
                     DisplayDiffHunk::Unfolded {
                         status: hunk.status(),
                         diff_base_byte_range: hunk.diff_base_byte_range.start.0
                             ..hunk.diff_base_byte_range.end.0,
+                        word_diffs: hunk.word_diffs,
                         display_row_range: hunk_display_start.row()..end_row,
                         multi_buffer_range: Anchor::range_in_buffer(
                             hunk.excerpt_id,
@@ -24898,6 +25059,7 @@ pub fn diagnostic_style(severity: lsp::DiagnosticSeverity, colors: &StatusColors
 pub fn styled_runs_for_code_label<'a>(
     label: &'a CodeLabel,
     syntax_theme: &'a theme::SyntaxTheme,
+    local_player: &'a theme::PlayerColor,
 ) -> impl 'a + Iterator<Item = (Range<usize>, HighlightStyle)> {
     let fade_out = HighlightStyle {
         fade_out: Some(0.35),
@@ -24910,7 +25072,17 @@ pub fn styled_runs_for_code_label<'a>(
         .iter()
         .enumerate()
         .flat_map(move |(ix, (range, highlight_id))| {
-            let style = if let Some(style) = highlight_id.style(syntax_theme) {
+            let style = if *highlight_id == language::HighlightId::TABSTOP_INSERT_ID {
+                HighlightStyle {
+                    color: Some(local_player.cursor),
+                    ..Default::default()
+                }
+            } else if *highlight_id == language::HighlightId::TABSTOP_REPLACE_ID {
+                HighlightStyle {
+                    background_color: Some(local_player.selection),
+                    ..Default::default()
+                }
+            } else if let Some(style) = highlight_id.style(syntax_theme) {
                 style
             } else {
                 return Default::default();

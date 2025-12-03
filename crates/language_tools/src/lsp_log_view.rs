@@ -744,7 +744,11 @@ impl Item for LspLogView {
         None
     }
 
-    fn as_searchable(&self, handle: &Entity<Self>) -> Option<Box<dyn SearchableItemHandle>> {
+    fn as_searchable(
+        &self,
+        handle: &Entity<Self>,
+        _: &App,
+    ) -> Option<Box<dyn SearchableItemHandle>> {
         Some(Box::new(handle.clone()))
     }
 
@@ -933,7 +937,7 @@ impl Render for LspLogToolbarItemView {
             })
             .collect();
 
-        let log_toolbar_view = cx.entity();
+        let log_toolbar_view = cx.weak_entity();
 
         let lsp_menu = PopoverMenu::new("LspLogView")
             .anchor(Corner::TopLeft)
@@ -1017,7 +1021,7 @@ impl Render for LspLogToolbarItemView {
                         .icon_color(Color::Muted),
                 )
                 .menu(move |window, cx| {
-                    let log_toolbar_view = log_toolbar_view.clone();
+                    let log_toolbar_view = log_toolbar_view.upgrade()?;
                     let log_view = log_view.clone();
                     Some(ContextMenu::build(window, cx, move |this, window, _| {
                         this.entry(
