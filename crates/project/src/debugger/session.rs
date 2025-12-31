@@ -2822,8 +2822,8 @@ impl Session {
             return Task::ready(());
         }
 
-        // Get the client from the running mode
-        let SessionState::Running(ref mode) = self.mode else {
+        // Get the client from the running state
+        let SessionState::Running(ref mode) = self.state else {
             return Task::ready(());
         };
 
