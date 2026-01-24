@@ -69,8 +69,8 @@ use language::{
     language_settings::{FormatOnSave, Formatter, LanguageSettings, language_settings},
     point_to_lsp,
     proto::{
-        deserialize_anchor, deserialize_lsp_edit, deserialize_version, serialize_anchor,
-        serialize_lsp_edit, serialize_version,
+        deserialize_anchor, deserialize_anchor_range, deserialize_lsp_edit, deserialize_version,
+        serialize_anchor, serialize_anchor_range, serialize_lsp_edit, serialize_version,
     },
     range_from_lsp, range_to_lsp,
     row_chunk::RowChunk,
@@ -98,14 +98,13 @@ use serde::Serialize;
 use serde_json::Value;
 use settings::{Settings, SettingsLocation, SettingsStore};
 use sha2::{Digest, Sha256};
-use smol::channel::{Receiver, Sender};
 use snippet::Snippet;
 use std::{
     any::TypeId,
     borrow::Cow,
     cell::RefCell,
     cmp::{Ordering, Reverse},
-    collections::hash_map,
+    collections::{VecDeque, hash_map},
     convert::TryInto,
     ffi::OsStr,
     future::ready,
@@ -126,7 +125,7 @@ use text::{Anchor, BufferId, LineEnding, OffsetRangeExt, ToPoint as _};
 
 use util::{
     ConnectionResult, ResultExt as _, debug_panic, defer, maybe, merge_json_value_into,
-    paths::{PathStyle, SanitizedPath},
+    paths::{PathStyle, SanitizedPath, UrlExt},
     post_inc,
     redact::redact_command,
     rel_path::RelPath,
@@ -146,6 +145,7 @@ const SERVER_LAUNCHING_BEFORE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5
 pub const SERVER_PROGRESS_THROTTLE_TIMEOUT: Duration = Duration::from_millis(100);
 const WORKSPACE_DIAGNOSTICS_TOKEN_START: &str = "id:";
 const SERVER_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
+static NEXT_PROMPT_REQUEST_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum ProgressToken {
@@ -300,7 +300,11 @@ pub struct LocalLspStore {
         LanguageServerId,
         HashMap<Option<SharedString>, HashMap<PathBuf, Option<SharedString>>>,
     >,
-    restricted_worktrees_tasks: HashMap<WorktreeId, (Subscription, Receiver<()>)>,
+    restricted_worktrees_tasks: HashMap<WorktreeId, (Subscription, watch::Receiver<bool>)>,
+
+    buffers_to_refresh_hash_set: HashSet<BufferId>,
+    buffers_to_refresh_queue: VecDeque<BufferId>,
+    _background_diagnostics_worker: Shared<Task<()>>,
 }
 
 impl LocalLspStore {
@@ -385,7 +389,7 @@ impl LocalLspStore {
             adapter.name.0
         );
 
-        let untrusted_worktree_task =
+        let wait_until_worktree_trust =
             TrustedWorktrees::try_get_global(cx).and_then(|trusted_worktrees| {
                 let can_trust = trusted_worktrees.update(cx, |trusted_worktrees, cx| {
                     trusted_worktrees.can_trust(&self.worktree_store, worktree_id, cx)
@@ -397,11 +401,23 @@ impl LocalLspStore {
                     match self.restricted_worktrees_tasks.entry(worktree_id) {
                         hash_map::Entry::Occupied(o) => Some(o.get().1.clone()),
                         hash_map::Entry::Vacant(v) => {
-                            let (tx, rx) = smol::channel::bounded::<()>(1);
-                            let subscription = cx.subscribe(&trusted_worktrees, move |_, e, _| {
+                            let (mut tx, rx) = watch::channel::<bool>();
+                            let lsp_store = self.weak.clone();
+                            let subscription = cx.subscribe(&trusted_worktrees, move |_, e, cx| {
                                 if let TrustedWorktreesEvent::Trusted(_, trusted_paths) = e {
                                     if trusted_paths.contains(&PathTrust::Worktree(worktree_id)) {
-                                        tx.send_blocking(()).ok();
+                                        tx.blocking_send(true).ok();
+                                        lsp_store
+                                            .update(cx, |lsp_store, _| {
+                                                if let Some(local_lsp_store) =
+                                                    lsp_store.as_local_mut()
+                                                {
+                                                    local_lsp_store
+                                                        .restricted_worktrees_tasks
+                                                        .remove(&worktree_id);
+                                                }
+                                            })
+                                            .ok();
                                     }
                                 }
                             });
@@ -411,7 +427,7 @@ impl LocalLspStore {
                     }
                 }
             });
-        let update_binary_status = untrusted_worktree_task.is_none();
+        let update_binary_status = wait_until_worktree_trust.is_none();
 
         let binary = self.get_language_server_binary(
             worktree_abs_path.clone(),
@@ -420,7 +436,7 @@ impl LocalLspStore {
             toolchain.clone(),
             delegate.clone(),
             true,
-            untrusted_worktree_task,
+            wait_until_worktree_trust,
             cx,
         );
         let pending_workspace_folders = Arc::<Mutex<BTreeSet<Uri>>>::default();
@@ -616,7 +632,7 @@ impl LocalLspStore {
         toolchain: Option<Toolchain>,
         delegate: Arc<dyn LspAdapterDelegate>,
         allow_binary_download: bool,
-        untrusted_worktree_task: Option<Receiver<()>>,
+        wait_until_worktree_trust: Option<watch::Receiver<bool>>,
         cx: &mut App,
     ) -> Task<Result<LanguageServerBinary>> {
         if let Some(settings) = &settings.binary
@@ -625,16 +641,23 @@ impl LocalLspStore {
             let settings = settings.clone();
             let languages = self.languages.clone();
             return cx.background_spawn(async move {
-                if let Some(untrusted_worktree_task) = untrusted_worktree_task {
-                    log::info!(
-                        "Waiting for worktree {worktree_abs_path:?} to be trusted, before starting language server {}",
-                        adapter.name(),
-                    );
-                    untrusted_worktree_task.recv().await.ok();
-                    log::info!(
-                        "Worktree {worktree_abs_path:?} is trusted, starting language server {}",
-                        adapter.name(),
-                    );
+                if let Some(mut wait_until_worktree_trust) = wait_until_worktree_trust {
+                    let already_trusted =  *wait_until_worktree_trust.borrow();
+                    if !already_trusted {
+                        log::info!(
+                            "Waiting for worktree {worktree_abs_path:?} to be trusted, before starting language server {}",
+                            adapter.name(),
+                        );
+                        while let Some(worktree_trusted) = wait_until_worktree_trust.recv().await {
+                            if worktree_trusted {
+                                break;
+                            }
+                        }
+                        log::info!(
+                            "Worktree {worktree_abs_path:?} is trusted, starting language server {}",
+                            adapter.name(),
+                        );
+                    }
                     languages
                         .update_lsp_binary_status(adapter.name(), BinaryStatus::Starting);
                 }
@@ -668,16 +691,23 @@ impl LocalLspStore {
         };
 
         cx.spawn(async move |cx| {
-            if let Some(untrusted_worktree_task) = untrusted_worktree_task {
-                log::info!(
-                    "Waiting for worktree {worktree_abs_path:?} to be trusted, before starting language server {}",
-                    adapter.name(),
-                );
-                untrusted_worktree_task.recv().await.ok();
-                log::info!(
-                    "Worktree {worktree_abs_path:?} is trusted, starting language server {}",
-                    adapter.name(),
-                );
+            if let Some(mut wait_until_worktree_trust) = wait_until_worktree_trust {
+                let already_trusted =  *wait_until_worktree_trust.borrow();
+                if !already_trusted {
+                    log::info!(
+                        "Waiting for worktree {worktree_abs_path:?} to be trusted, before starting language server {}",
+                        adapter.name(),
+                    );
+                    while let Some(worktree_trusted) = wait_until_worktree_trust.recv().await {
+                        if worktree_trusted {
+                            break;
+                        }
+                    }
+                    log::info!(
+                        "Worktree {worktree_abs_path:?} is trusted, starting language server {}",
+                            adapter.name(),
+                    );
+                }
             }
 
             let (existing_binary, maybe_download_binary) = adapter
@@ -1036,7 +1066,6 @@ impl LocalLspStore {
                     async move {
                         this.update(&mut cx, |lsp_store, cx| {
                             lsp_store.pull_workspace_diagnostics(server_id);
-                            lsp_store.pull_document_diagnostics_for_server(server_id, cx);
                             lsp_store
                                 .downstream_client
                                 .as_ref()
@@ -1046,8 +1075,12 @@ impl LocalLspStore {
                                         server_id: server_id.to_proto(),
                                     })
                                 })
-                        })?
-                        .transpose()?;
+                                .transpose()?;
+                            anyhow::Ok(
+                                lsp_store.pull_document_diagnostics_for_server(server_id, None, cx),
+                            )
+                        })??
+                        .await;
                         Ok(())
                     }
                 }
@@ -1067,18 +1100,19 @@ impl LocalLspStore {
                     async move {
                         let actions = params.actions.unwrap_or_default();
                         let message = params.message.clone();
-                        let (tx, rx) = smol::channel::bounded(1);
-                        let request = LanguageServerPromptRequest {
-                            level: match params.typ {
-                                lsp::MessageType::ERROR => PromptLevel::Critical,
-                                lsp::MessageType::WARNING => PromptLevel::Warning,
-                                _ => PromptLevel::Info,
-                            },
-                            message: params.message,
-                            actions,
-                            response_channel: tx,
-                            lsp_name: name.clone(),
+                        let (tx, rx) = smol::channel::bounded::<MessageActionItem>(1);
+                        let level = match params.typ {
+                            lsp::MessageType::ERROR => PromptLevel::Critical,
+                            lsp::MessageType::WARNING => PromptLevel::Warning,
+                            _ => PromptLevel::Info,
                         };
+                        let request = LanguageServerPromptRequest::new(
+                            level,
+                            params.message,
+                            actions,
+                            name.clone(),
+                            tx,
+                        );
 
                         let did_update = this
                             .update(&mut cx, |_, cx| {
@@ -1113,17 +1147,13 @@ impl LocalLspStore {
                     let mut cx = cx.clone();
 
                     let (tx, _) = smol::channel::bounded(1);
-                    let request = LanguageServerPromptRequest {
-                        level: match params.typ {
-                            lsp::MessageType::ERROR => PromptLevel::Critical,
-                            lsp::MessageType::WARNING => PromptLevel::Warning,
-                            _ => PromptLevel::Info,
-                        },
-                        message: params.message,
-                        actions: vec![],
-                        response_channel: tx,
-                        lsp_name: name,
+                    let level = match params.typ {
+                        lsp::MessageType::ERROR => PromptLevel::Critical,
+                        lsp::MessageType::WARNING => PromptLevel::Warning,
+                        _ => PromptLevel::Info,
                     };
+                    let request =
+                        LanguageServerPromptRequest::new(level, params.message, vec![], name, tx);
 
                     let _ = this.update(&mut cx, |_, cx| {
                         cx.emit(LspStoreEvent::LanguageServerPrompt(request));
@@ -1621,7 +1651,7 @@ impl LocalLspStore {
 
                     let diff = Self::format_via_external_command(
                         buffer,
-                        command.as_ref(),
+                        &command,
                         arguments.as_deref(),
                         cx,
                     )
@@ -4026,6 +4056,9 @@ impl LspStore {
                 language_server_paths_watched_for_rename: Default::default(),
                 language_server_dynamic_registrations: Default::default(),
                 buffers_being_formatted: Default::default(),
+                buffers_to_refresh_hash_set: HashSet::default(),
+                buffers_to_refresh_queue: VecDeque::new(),
+                _background_diagnostics_worker: Task::ready(()).shared(),
                 buffer_snapshots: Default::default(),
                 prettier_store,
                 environment,
@@ -4276,6 +4309,47 @@ impl LspStore {
         }
 
         Ok(())
+    }
+
+    pub fn refresh_background_diagnostics_for_buffers(
+        &mut self,
+        buffers: HashSet<BufferId>,
+        cx: &mut Context<Self>,
+    ) -> Shared<Task<()>> {
+        let Some(local) = self.as_local_mut() else {
+            return Task::ready(()).shared();
+        };
+        for buffer in buffers {
+            if local.buffers_to_refresh_hash_set.insert(buffer) {
+                local.buffers_to_refresh_queue.push_back(buffer);
+                if local.buffers_to_refresh_queue.len() == 1 {
+                    local._background_diagnostics_worker =
+                        Self::background_diagnostics_worker(cx).shared();
+                }
+            }
+        }
+
+        local._background_diagnostics_worker.clone()
+    }
+
+    fn refresh_next_buffer(&mut self, cx: &mut Context<Self>) -> Option<Task<Result<()>>> {
+        let buffer_store = self.buffer_store.clone();
+        let local = self.as_local_mut()?;
+        while let Some(buffer_id) = local.buffers_to_refresh_queue.pop_front() {
+            local.buffers_to_refresh_hash_set.remove(&buffer_id);
+            if let Some(buffer) = buffer_store.read(cx).get(buffer_id) {
+                return Some(self.pull_diagnostics_for_buffer(buffer, cx));
+            }
+        }
+        None
+    }
+
+    fn background_diagnostics_worker(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            while let Ok(Some(task)) = this.update(cx, |this, cx| this.refresh_next_buffer(cx)) {
+                task.await.log_err();
+            }
+        })
     }
 
     pub(crate) fn register_buffer_with_language_servers(
@@ -7789,46 +7863,62 @@ impl LspStore {
                 let worktree_handle = worktree_handle.clone();
                 let server_id = server.server_id();
                 requests.push(
-                        server
-                            .request::<lsp::request::WorkspaceSymbolRequest>(
-                                lsp::WorkspaceSymbolParams {
-                                    query: query.to_string(),
-                                    ..Default::default()
-                                },
-                            )
-                            .map(move |response| {
-                                let lsp_symbols = response.into_response()
-                                    .context("workspace symbols request")
-                                    .log_err()
-                                    .flatten()
-                                    .map(|symbol_response| match symbol_response {
-                                        lsp::WorkspaceSymbolResponse::Flat(flat_responses) => {
-                                            flat_responses.into_iter().map(|lsp_symbol| {
-                                            (lsp_symbol.name, lsp_symbol.kind, lsp_symbol.location)
-                                            }).collect::<Vec<_>>()
-                                        }
-                                        lsp::WorkspaceSymbolResponse::Nested(nested_responses) => {
-                                            nested_responses.into_iter().filter_map(|lsp_symbol| {
+                    server
+                        .request::<lsp::request::WorkspaceSymbolRequest>(
+                            lsp::WorkspaceSymbolParams {
+                                query: query.to_string(),
+                                ..Default::default()
+                            },
+                        )
+                        .map(move |response| {
+                            let lsp_symbols = response
+                                .into_response()
+                                .context("workspace symbols request")
+                                .log_err()
+                                .flatten()
+                                .map(|symbol_response| match symbol_response {
+                                    lsp::WorkspaceSymbolResponse::Flat(flat_responses) => {
+                                        flat_responses
+                                            .into_iter()
+                                            .map(|lsp_symbol| {
+                                                (
+                                                    lsp_symbol.name,
+                                                    lsp_symbol.kind,
+                                                    lsp_symbol.location,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    }
+                                    lsp::WorkspaceSymbolResponse::Nested(nested_responses) => {
+                                        nested_responses
+                                            .into_iter()
+                                            .filter_map(|lsp_symbol| {
                                                 let location = match lsp_symbol.location {
                                                     OneOf::Left(location) => location,
                                                     OneOf::Right(_) => {
-                                                        log::error!("Unexpected: client capabilities forbid symbol resolutions in workspace.symbol.resolveSupport");
-                                                        return None
+                                                        log::error!(
+                                                            "Unexpected: client capabilities \
+                                                            forbid symbol resolutions in \
+                                                            workspace.symbol.resolveSupport"
+                                                        );
+                                                        return None;
                                                     }
                                                 };
                                                 Some((lsp_symbol.name, lsp_symbol.kind, location))
-                                            }).collect::<Vec<_>>()
-                                        }
-                                    }).unwrap_or_default();
+                                            })
+                                            .collect::<Vec<_>>()
+                                    }
+                                })
+                                .unwrap_or_default();
 
-                                WorkspaceSymbolsResult {
-                                    server_id,
-                                    lsp_adapter,
-                                    worktree: worktree_handle.downgrade(),
-                                    lsp_symbols,
-                                }
-                            }),
-                    );
+                            WorkspaceSymbolsResult {
+                                server_id,
+                                lsp_adapter,
+                                worktree: worktree_handle.downgrade(),
+                                lsp_symbols,
+                            }
+                        }),
+                );
             }
 
             cx.spawn(async move |this, cx| {
@@ -8677,13 +8767,14 @@ impl LspStore {
         language_server_id: LanguageServerId,
         cx: &mut Context<Self>,
     ) -> Task<Result<Entity<Buffer>>> {
+        let path_style = self.worktree_store.read(cx).path_style();
         cx.spawn(async move |lsp_store, cx| {
             // Escape percent-encoded string.
             let current_scheme = abs_path.scheme().to_owned();
             // Uri is immutable, so we can't modify the scheme
 
             let abs_path = abs_path
-                .to_file_path()
+                .to_file_path_ext(path_style)
                 .map_err(|()| anyhow!("can't convert URI to path"))?;
             let p = abs_path.clone();
             let yarn_worktree = lsp_store
@@ -9247,6 +9338,11 @@ impl LspStore {
                 false,
                 cx,
             );
+            // Pull diagnostics for the buffer even if it was already registered.
+            // This is needed to make test_streamed_lsp_pull_diagnostics pass,
+            // but it's unclear if we need it.
+            this.pull_diagnostics_for_buffer(buffer.clone(), cx)
+                .detach();
             this.buffer_store().update(cx, |buffer_store, _| {
                 buffer_store.register_shared_lsp_handle(peer_id, buffer_id, handle);
             });
@@ -10704,14 +10800,17 @@ impl LspStore {
         } else if let Some((client, project_id)) = self.upstream_client() {
             zlog::trace!(logger => "Formatting remotely");
             let logger = zlog::scoped!(logger => "remote");
-            // Don't support formatting ranges via remote
-            match target {
-                LspFormatTarget::Buffers => {}
-                LspFormatTarget::Ranges(_) => {
-                    zlog::trace!(logger => "Ignoring unsupported remote range formatting request");
-                    return Task::ready(Ok(ProjectTransaction::default()));
-                }
-            }
+
+            let buffer_ranges = match &target {
+                LspFormatTarget::Buffers => Vec::new(),
+                LspFormatTarget::Ranges(ranges) => ranges
+                    .iter()
+                    .map(|(buffer_id, ranges)| proto::BufferFormatRanges {
+                        buffer_id: buffer_id.to_proto(),
+                        ranges: ranges.iter().cloned().map(serialize_anchor_range).collect(),
+                    })
+                    .collect(),
+            };
 
             let buffer_store = self.buffer_store();
             cx.spawn(async move |lsp_store, cx| {
@@ -10725,6 +10824,7 @@ impl LspStore {
                             .iter()
                             .map(|buffer| buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto()))
                             .collect(),
+                        buffer_ranges,
                     })
                     .await
                     .and_then(|result| result.transaction.context("missing transaction"));
@@ -10766,8 +10866,27 @@ impl LspStore {
                 let buffer_id = BufferId::new(*buffer_id)?;
                 buffers.insert(this.buffer_store.read(cx).get_existing(buffer_id)?);
             }
+
+            let target = if envelope.payload.buffer_ranges.is_empty() {
+                LspFormatTarget::Buffers
+            } else {
+                let mut ranges_map = BTreeMap::new();
+                for buffer_range in &envelope.payload.buffer_ranges {
+                    let buffer_id = BufferId::new(buffer_range.buffer_id)?;
+                    let ranges: Result<Vec<_>> = buffer_range
+                        .ranges
+                        .iter()
+                        .map(|range| {
+                            deserialize_anchor_range(range.clone()).context("invalid anchor range")
+                        })
+                        .collect();
+                    ranges_map.insert(buffer_id, ranges?);
+                }
+                LspFormatTarget::Ranges(ranges_map)
+            };
+
             let trigger = FormatTrigger::from_proto(envelope.payload.trigger);
-            anyhow::Ok(this.format(buffers, LspFormatTarget::Buffers, false, trigger, cx))
+            anyhow::Ok(this.format(buffers, target, false, trigger, cx))
         })?;
 
         let project_transaction = format.await?;
@@ -10969,6 +11088,10 @@ impl LspStore {
     }
 
     pub fn stop_all_language_servers(&mut self, cx: &mut Context<Self>) {
+        self.shutdown_all_language_servers(cx).detach();
+    }
+
+    pub fn shutdown_all_language_servers(&mut self, cx: &mut Context<Self>) -> Task<()> {
         if let Some((client, project_id)) = self.upstream_client() {
             let request = client.request(proto::StopLanguageServers {
                 project_id,
@@ -10976,10 +11099,12 @@ impl LspStore {
                 also_servers: Vec::new(),
                 all: true,
             });
-            cx.background_spawn(request).detach_and_log_err(cx);
+            cx.background_spawn(async move {
+                request.await.ok();
+            })
         } else {
             let Some(local) = self.as_local_mut() else {
-                return;
+                return Task::ready(());
             };
             let language_servers_to_stop = local
                 .language_server_ids
@@ -10994,7 +11119,6 @@ impl LspStore {
             cx.background_spawn(async move {
                 futures::future::join_all(tasks).await;
             })
-            .detach();
         }
     }
 
@@ -12179,25 +12303,36 @@ impl LspStore {
     pub fn pull_document_diagnostics_for_server(
         &mut self,
         server_id: LanguageServerId,
+        source_buffer_id: Option<BufferId>,
+        cx: &mut Context<Self>,
+    ) -> Shared<Task<()>> {
+        let Some(local) = self.as_local_mut() else {
+            return Task::ready(()).shared();
+        };
+        let mut buffers_to_refresh = HashSet::default();
+        for (buffer_id, server_ids) in &local.buffers_opened_in_servers {
+            if server_ids.contains(&server_id) && Some(buffer_id) != source_buffer_id.as_ref() {
+                buffers_to_refresh.insert(*buffer_id);
+            }
+        }
+
+        self.refresh_background_diagnostics_for_buffers(buffers_to_refresh, cx)
+    }
+
+    pub fn pull_document_diagnostics_for_buffer_edit(
+        &mut self,
+        buffer_id: BufferId,
         cx: &mut Context<Self>,
     ) {
-        let buffers_to_pull: Vec<_> = self
-            .as_local()
-            .into_iter()
-            .flat_map(|local| {
-                self.buffer_store.read(cx).buffers().filter(|buffer| {
-                    let buffer_id = buffer.read(cx).remote_id();
-                    local
-                        .buffers_opened_in_servers
-                        .get(&buffer_id)
-                        .is_some_and(|servers| servers.contains(&server_id))
-                })
-            })
-            .collect();
-
-        for buffer in buffers_to_pull {
-            self.pull_diagnostics_for_buffer(buffer, cx)
-                .detach_and_log_err(cx);
+        let Some(local) = self.as_local_mut() else {
+            return;
+        };
+        let Some(languages_servers) = local.buffers_opened_in_servers.get(&buffer_id).cloned()
+        else {
+            return;
+        };
+        for server_id in languages_servers {
+            let _ = self.pull_document_diagnostics_for_server(server_id, Some(buffer_id), cx);
         }
     }
 
@@ -12641,7 +12776,7 @@ impl LspStore {
 
                         notify_server_capabilities_updated(&server, cx);
 
-                        self.pull_document_diagnostics_for_server(server_id, cx);
+                        let _ = self.pull_document_diagnostics_for_server(server_id, None, cx);
                     }
                 }
                 "textDocument/documentColor" => {
@@ -13669,20 +13804,49 @@ struct LspBufferSnapshot {
 /// A prompt requested by LSP server.
 #[derive(Clone, Debug)]
 pub struct LanguageServerPromptRequest {
+    pub id: usize,
     pub level: PromptLevel,
     pub message: String,
     pub actions: Vec<MessageActionItem>,
     pub lsp_name: String,
-    pub(crate) response_channel: Sender<MessageActionItem>,
+    pub(crate) response_channel: smol::channel::Sender<MessageActionItem>,
 }
 
 impl LanguageServerPromptRequest {
+    pub fn new(
+        level: PromptLevel,
+        message: String,
+        actions: Vec<MessageActionItem>,
+        lsp_name: String,
+        response_channel: smol::channel::Sender<MessageActionItem>,
+    ) -> Self {
+        let id = NEXT_PROMPT_REQUEST_ID.fetch_add(1, atomic::Ordering::AcqRel);
+        LanguageServerPromptRequest {
+            id,
+            level,
+            message,
+            actions,
+            lsp_name,
+            response_channel,
+        }
+    }
     pub async fn respond(self, index: usize) -> Option<()> {
         if let Some(response) = self.actions.into_iter().nth(index) {
             self.response_channel.send(response).await.ok()
         } else {
             None
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test(
+        level: PromptLevel,
+        message: String,
+        actions: Vec<MessageActionItem>,
+        lsp_name: String,
+    ) -> Self {
+        let (tx, _rx) = smol::channel::unbounded();
+        LanguageServerPromptRequest::new(level, message, actions, lsp_name, tx)
     }
 }
 impl PartialEq for LanguageServerPromptRequest {
