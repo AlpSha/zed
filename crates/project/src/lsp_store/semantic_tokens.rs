@@ -11,7 +11,7 @@ use futures::{
 use gpui::{App, AppContext, AsyncApp, Context, Entity, ReadGlobal as _, SharedString, Task};
 use itertools::Itertools;
 use language::{Buffer, LanguageName, language_settings::all_language_settings};
-use lsp::{AdapterServerCapabilities, LSP_REQUEST_TIMEOUT, LanguageServerId};
+use lsp::{AdapterServerCapabilities, LanguageServerId};
 use rpc::{TypedEnvelope, proto};
 use settings::{SemanticTokenRule, SemanticTokenRules, Settings as _, SettingsStore};
 use smol::future::yield_now;
@@ -206,10 +206,13 @@ impl LspStore {
                 return Task::ready(None);
             }
 
+            let request_timeout = ProjectSettings::get_global(cx)
+                .global_lsp_settings
+                .get_request_timeout();
             let request_task = client.request_lsp(
                 upstream_project_id,
                 None,
-                LSP_REQUEST_TIMEOUT,
+                request_timeout,
                 cx.background_executor().clone(),
                 request.to_proto(upstream_project_id, buffer.read(cx)),
             );
@@ -411,6 +414,9 @@ pub struct TokenType(pub u32);
 
 #[derive(Debug, Clone)]
 pub struct BufferSemanticToken {
+    /// The range of the token in the buffer.
+    ///
+    /// Guaranteed to contain a buffer id.
     pub range: Range<Anchor>,
     pub token_type: TokenType,
     pub token_modifiers: u32,
@@ -522,6 +528,7 @@ async fn raw_to_buffer_semantic_tokens(
 ) -> HashMap<LanguageServerId, Arc<[BufferSemanticToken]>> {
     let mut res = HashMap::default();
     for (&server_id, server_tokens) in &raw_tokens.servers {
+        let mut last = 0;
         // We don't do `collect` here due to the filter map not pre-allocating
         // we'd rather over allocate here than not since we have to re-allocate into an arc slice anyways
         let mut buffer_tokens = Vec::with_capacity(server_tokens.data.len() / 5);
@@ -540,7 +547,15 @@ async fn raw_to_buffer_semantic_tokens(
                 let start = buffer_snapshot
                     .as_rope()
                     .offset_utf16_to_offset(start_offset);
+                if start < last {
+                    return None;
+                }
+
                 let end = buffer_snapshot.as_rope().offset_utf16_to_offset(end_offset);
+                if end < last {
+                    return None;
+                }
+                last = end;
 
                 if start == end {
                     return None;
