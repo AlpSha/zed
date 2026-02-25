@@ -1176,7 +1176,7 @@ impl ProjectPanel {
                             })
                             .when(should_show_compare, |menu| {
                                 menu.separator()
-                                    .action("Compare marked files", Box::new(CompareMarkedFiles))
+                                    .action("Compare Marked Files", Box::new(CompareMarkedFiles))
                             })
                             .separator()
                             .action("Cut", Box::new(Cut))
@@ -2664,7 +2664,7 @@ impl ProjectPanel {
         let selection = self.find_entry(
             self.selection.as_ref(),
             true,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 self.selection.is_none_or(|selection| {
                     if selection.worktree_id == worktree_id {
                         selection.entry_id != entry.id
@@ -2703,7 +2703,7 @@ impl ProjectPanel {
         let selection = self.find_entry(
             self.selection.as_ref(),
             false,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 self.selection.is_none_or(|selection| {
                     if selection.worktree_id == worktree_id {
                         selection.entry_id != entry.id
@@ -2742,7 +2742,7 @@ impl ProjectPanel {
         let selection = self.find_entry(
             self.selection.as_ref(),
             true,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 (self.selection.is_none()
                     || self.selection.is_some_and(|selection| {
                         if selection.worktree_id == worktree_id {
@@ -2780,7 +2780,7 @@ impl ProjectPanel {
         let selection = self.find_visible_entry(
             self.selection.as_ref(),
             true,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 self.selection.is_none_or(|selection| {
                     if selection.worktree_id == worktree_id {
                         selection.entry_id != entry.id
@@ -2808,7 +2808,7 @@ impl ProjectPanel {
         let selection = self.find_visible_entry(
             self.selection.as_ref(),
             false,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 self.selection.is_none_or(|selection| {
                     if selection.worktree_id == worktree_id {
                         selection.entry_id != entry.id
@@ -2836,7 +2836,7 @@ impl ProjectPanel {
         let selection = self.find_entry(
             self.selection.as_ref(),
             false,
-            |entry, worktree_id| {
+            &|entry: GitEntryRef, worktree_id: WorktreeId| {
                 self.selection.is_none_or(|selection| {
                     if selection.worktree_id == worktree_id {
                         selection.entry_id != entry.id
@@ -4479,7 +4479,7 @@ impl ProjectPanel {
         range: Range<usize>,
         window: &mut Window,
         cx: &mut Context<ProjectPanel>,
-        mut callback: impl FnMut(
+        callback: &mut dyn FnMut(
             &Entry,
             usize,
             &HashSet<Arc<RelPath>>,
@@ -4517,7 +4517,12 @@ impl ProjectPanel {
         range: Range<usize>,
         window: &mut Window,
         cx: &mut Context<ProjectPanel>,
-        mut callback: impl FnMut(ProjectEntryId, EntryDetails, &mut Window, &mut Context<ProjectPanel>),
+        callback: &mut dyn FnMut(
+            ProjectEntryId,
+            EntryDetails,
+            &mut Window,
+            &mut Context<ProjectPanel>,
+        ),
     ) {
         let mut ix = 0;
         for visible in &self.state.visible_entries {
@@ -4632,7 +4637,7 @@ impl ProjectPanel {
         worktree_id: WorktreeId,
         reverse_search: bool,
         only_visible_entries: bool,
-        predicate: impl Fn(GitEntryRef, WorktreeId) -> bool,
+        predicate: &dyn Fn(GitEntryRef, WorktreeId) -> bool,
         cx: &mut Context<Self>,
     ) -> Option<GitEntry> {
         if only_visible_entries {
@@ -4675,7 +4680,7 @@ impl ProjectPanel {
         &self,
         start: Option<&SelectedEntry>,
         reverse_search: bool,
-        predicate: impl Fn(GitEntryRef, WorktreeId) -> bool,
+        predicate: &dyn Fn(GitEntryRef, WorktreeId) -> bool,
         cx: &mut Context<Self>,
     ) -> Option<SelectedEntry> {
         let mut worktree_ids: Vec<_> = self
@@ -4792,7 +4797,7 @@ impl ProjectPanel {
         &self,
         start: Option<&SelectedEntry>,
         reverse_search: bool,
-        predicate: impl Fn(GitEntryRef, WorktreeId) -> bool,
+        predicate: &dyn Fn(GitEntryRef, WorktreeId) -> bool,
         cx: &mut Context<Self>,
     ) -> Option<SelectedEntry> {
         let mut worktree_ids: Vec<_> = self
@@ -5393,7 +5398,7 @@ impl ProjectPanel {
                                 range_start..range_end,
                                 window,
                                 cx,
-                                |entry_id, details, _, _| {
+                                &mut |entry_id, details, _, _| {
                                     new_selections.push(SelectedEntry {
                                         entry_id,
                                         worktree_id: details.worktree_id,
@@ -6372,7 +6377,7 @@ impl Render for ProjectPanel {
                                         range,
                                         window,
                                         cx,
-                                        |id, details, window, cx| {
+                                        &mut |id, details, window, cx| {
                                             items.push(this.render_entry(id, details, window, cx));
                                         },
                                     );
@@ -6394,7 +6399,7 @@ impl Render for ProjectPanel {
                                                 range,
                                                 window,
                                                 cx,
-                                                |entry, _, entries, _, _| {
+                                                &mut |entry, _, entries, _, _| {
                                                     let (depth, _) =
                                                         Self::calculate_depth_and_difference(
                                                             entry, entries,
@@ -6507,7 +6512,7 @@ impl Render for ProjectPanel {
                                             range,
                                             window,
                                             cx,
-                                            |entry, index, entries, _, _| {
+                                            &mut |entry, index, entries, _, _| {
                                                 let (depth, _) =
                                                     Self::calculate_depth_and_difference(
                                                         entry, entries,

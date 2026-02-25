@@ -7835,7 +7835,7 @@ pub fn render_breadcrumb_text(
             return styled_element;
         }
 
-        StyledText::new(segment.text.replace('\n', "⏎"))
+        StyledText::new(segment.text.replace('\n', " "))
             .with_default_highlights(&text_style, segment.highlights.unwrap_or_default())
             .into_any()
     });
@@ -8139,6 +8139,7 @@ pub(crate) fn render_buffer_header(
         .h(FILE_HEADER_HEIGHT as f32 * window.line_height())
         .child(
             h_flex()
+                .group("buffer-header-group")
                 .size_full()
                 .flex_basis(Length::Definite(DefiniteLength::Fraction(0.667)))
                 .pl_1()
@@ -8332,31 +8333,36 @@ pub(crate) fn render_buffer_header(
                                     })
                             },
                         ))
-                        .when(
-                            can_open_excerpts && is_selected && relative_path.is_some(),
-                            |el| {
-                                el.child(
-                                    Button::new("open-file-button", "Open File")
-                                        .style(ButtonStyle::OutlinedGhost)
-                                        .key_binding(KeyBinding::for_action_in(
-                                            &OpenExcerpts,
-                                            &focus_handle,
-                                            cx,
-                                        ))
-                                        .on_click(window.listener_for(editor, {
-                                            let jump_data = jump_data.clone();
-                                            move |editor, e: &ClickEvent, window, cx| {
-                                                editor.open_excerpts_common(
-                                                    Some(jump_data.clone()),
-                                                    e.modifiers().secondary(),
-                                                    window,
+                        .when(can_open_excerpts && relative_path.is_some(), |this| {
+                            this.child(
+                                div()
+                                    .when(!is_selected, |this| {
+                                        this.visible_on_hover("buffer-header-group")
+                                    })
+                                    .child(
+                                        Button::new("open-file-button", "Open File")
+                                            .style(ButtonStyle::OutlinedGhost)
+                                            .when(is_selected, |this| {
+                                                this.key_binding(KeyBinding::for_action_in(
+                                                    &OpenExcerpts,
+                                                    &focus_handle,
                                                     cx,
-                                                );
-                                            }
-                                        })),
-                                )
-                            },
-                        )
+                                                ))
+                                            })
+                                            .on_click(window.listener_for(editor, {
+                                                let jump_data = jump_data.clone();
+                                                move |editor, e: &ClickEvent, window, cx| {
+                                                    editor.open_excerpts_common(
+                                                        Some(jump_data.clone()),
+                                                        e.modifiers().secondary(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    ),
+                            )
+                        })
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(window.listener_for(editor, {
                             let buffer_id = for_excerpt.buffer_id;
@@ -9752,11 +9758,39 @@ impl Element for EditorElement {
                     let mut highlighted_ranges = self
                         .editor_with_selections(cx)
                         .map(|editor| {
-                            editor.read(cx).background_highlights_in_range(
-                                start_anchor..end_anchor,
-                                &snapshot.display_snapshot,
-                                cx.theme(),
-                            )
+                            if editor == self.editor {
+                                editor.read(cx).background_highlights_in_range(
+                                    start_anchor..end_anchor,
+                                    &snapshot.display_snapshot,
+                                    cx.theme(),
+                                )
+                            } else {
+                                editor.update(cx, |editor, cx| {
+                                    let snapshot = editor.snapshot(window, cx);
+                                    let start_anchor = if start_row == Default::default() {
+                                        Anchor::min()
+                                    } else {
+                                        snapshot.buffer_snapshot().anchor_before(
+                                            DisplayPoint::new(start_row, 0)
+                                                .to_offset(&snapshot, Bias::Left),
+                                        )
+                                    };
+                                    let end_anchor = if end_row > max_row {
+                                        Anchor::max()
+                                    } else {
+                                        snapshot.buffer_snapshot().anchor_before(
+                                            DisplayPoint::new(end_row, 0)
+                                                .to_offset(&snapshot, Bias::Right),
+                                        )
+                                    };
+
+                                    editor.background_highlights_in_range(
+                                        start_anchor..end_anchor,
+                                        &snapshot.display_snapshot,
+                                        cx.theme(),
+                                    )
+                                })
+                            }
                         })
                         .unwrap_or_default();
 
@@ -12228,9 +12262,6 @@ mod tests {
     #[gpui::test]
     async fn test_soft_wrap_editor_width_auto_height_editor(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
-        // Ensure wrap completes synchronously by giving block_with_timeout enough ticks
-        cx.dispatcher.scheduler().set_timeout_ticks(1000..=1000);
-
         let window = cx.add_window(|window, cx| {
             let buffer = MultiBuffer::build_simple(&"a ".to_string().repeat(100), cx);
             let mut editor = Editor::new(
@@ -12267,9 +12298,6 @@ mod tests {
     #[gpui::test]
     async fn test_soft_wrap_editor_width_full_editor(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
-        // Ensure wrap completes synchronously by giving block_with_timeout enough ticks
-        cx.dispatcher.scheduler().set_timeout_ticks(1000..=1000);
-
         let window = cx.add_window(|window, cx| {
             let buffer = MultiBuffer::build_simple(&"a ".to_string().repeat(100), cx);
             let mut editor = Editor::new(EditorMode::full(), buffer, None, window, cx);
@@ -12535,7 +12563,7 @@ mod tests {
             Editor::new(EditorMode::full(), buffer, None, window, cx)
         });
 
-        update_test_language_settings(cx, |s| {
+        update_test_language_settings(cx, &|s| {
             s.defaults.preferred_line_length = Some(5_u32);
             s.defaults.soft_wrap = Some(language_settings::SoftWrap::PreferredLineLength);
         });
@@ -12915,7 +12943,7 @@ mod tests {
         let mut editor_width = 200.0;
         while editor_width <= 1000.0 {
             for show_line_numbers in [true, false] {
-                update_test_language_settings(cx, |s| {
+                update_test_language_settings(cx, &|s| {
                     s.defaults.tab_size = NonZeroU32::new(tab_size);
                     s.defaults.show_whitespaces = Some(ShowWhitespaceSetting::All);
                     s.defaults.preferred_line_length = Some(editor_width as u32);

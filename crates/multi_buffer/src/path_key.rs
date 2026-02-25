@@ -57,7 +57,7 @@ impl MultiBuffer {
         self.excerpts_by_path
             .get(path)
             .map(|excerpts| excerpts.as_slice())
-            .unwrap_or(&[])
+            .unwrap_or_default()
             .iter()
             .copied()
     }
@@ -188,7 +188,13 @@ impl MultiBuffer {
         direction: ExpandExcerptDirection,
         cx: &mut Context<Self>,
     ) {
-        let grouped = ids
+        let mut sorted_ids: Vec<ExcerptId> = ids.into_iter().collect();
+        sorted_ids.sort_by(|a, b| {
+            let path_a = self.paths_by_excerpt.get(a);
+            let path_b = self.paths_by_excerpt.get(b);
+            path_a.cmp(&path_b)
+        });
+        let grouped = sorted_ids
             .into_iter()
             .chunk_by(|id| self.paths_by_excerpt.get(id).cloned())
             .into_iter()
@@ -376,9 +382,7 @@ impl MultiBuffer {
                 {
                     last.context.end = last.context.end.max(existing_range.end);
                     to_remove.push(*existing_id);
-                    self.snapshot
-                        .get_mut()
-                        .replaced_excerpts
+                    Arc::make_mut(&mut self.snapshot.get_mut().replaced_excerpts)
                         .insert(*existing_id, *last_id);
                     existing_iter.next();
                     continue;
@@ -456,9 +460,7 @@ impl MultiBuffer {
                 (Some(_), Some((_, existing_range))) => {
                     let existing_id = existing_iter.next().unwrap();
                     let new_id = next_excerpt_id();
-                    self.snapshot
-                        .get_mut()
-                        .replaced_excerpts
+                    Arc::make_mut(&mut self.snapshot.get_mut().replaced_excerpts)
                         .insert(existing_id, new_id);
                     to_remove.push(existing_id);
                     let mut range = new_iter.next().unwrap();
@@ -471,16 +473,25 @@ impl MultiBuffer {
         }
 
         self.insert_excerpts_with_ids_after(insert_after, buffer, to_insert, cx);
+        // todo(lw): There is a logic bug somewhere that causes the to_remove vector to be not ordered correctly
+        to_remove.sort_by_cached_key(|&id| snapshot.excerpt_locator_for_id(id));
         self.remove_excerpts(to_remove, cx);
 
         if excerpt_ids.is_empty() {
             self.excerpts_by_path.remove(&path);
         } else {
-            for excerpt_id in &excerpt_ids {
-                self.paths_by_excerpt.insert(*excerpt_id, path.clone());
+            let snapshot = &*self.snapshot.get_mut();
+            let excerpt_ids = excerpt_ids
+                .iter()
+                .dedup()
+                .cloned()
+                // todo(lw): There is a logic bug somewhere that causes excerpt_ids to not necessarily be in order by locator
+                .sorted_by_cached_key(|&id| snapshot.excerpt_locator_for_id(id))
+                .collect();
+            for &excerpt_id in &excerpt_ids {
+                self.paths_by_excerpt.insert(excerpt_id, path.clone());
             }
-            self.excerpts_by_path
-                .insert(path, excerpt_ids.iter().dedup().cloned().collect());
+            self.excerpts_by_path.insert(path, excerpt_ids);
         }
 
         PathExcerptInsertResult {

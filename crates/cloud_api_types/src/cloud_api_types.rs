@@ -35,8 +35,8 @@ pub struct AuthenticatedUser {
     pub accepted_tos_at: Option<Timestamp>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct OrganizationId(Arc<str>);
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
+pub struct OrganizationId(pub Arc<str>);
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Organization {
@@ -63,6 +63,15 @@ pub struct SubmitAgentThreadFeedbackBody {
     pub agent: String,
     pub session_id: String,
     pub rating: String,
+    pub thread: serde_json::Value,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubmitAgentThreadFeedbackCommentsBody {
+    pub organization_id: Option<OrganizationId>,
+    pub agent: String,
+    pub session_id: String,
+    pub comments: String,
     pub thread: serde_json::Value,
 }
 

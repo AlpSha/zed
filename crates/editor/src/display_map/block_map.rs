@@ -736,7 +736,7 @@ impl BlockMap {
     }
 
     // Warning: doesn't sync the block map, use advisedly
-    pub(crate) fn retain_blocks_raw(&mut self, mut pred: impl FnMut(&Arc<CustomBlock>) -> bool) {
+    pub(crate) fn retain_blocks_raw(&mut self, pred: &mut dyn FnMut(&Arc<CustomBlock>) -> bool) {
         let mut ids_to_remove = HashSet::default();
         self.custom_blocks.retain(|block| {
             let keep = pred(block);
@@ -1252,11 +1252,6 @@ impl BlockMap {
         let mut our_tab_point_cursor = wrap_snapshot.tab_point_cursor();
         let mut our_wrap_point_cursor = wrap_snapshot.wrap_point_cursor();
 
-        let mut companion_inlay_point_cursor = companion_snapshot.inlay_point_cursor();
-        let mut companion_fold_point_cursor = companion_snapshot.fold_point_cursor();
-        let mut companion_tab_point_cursor = companion_snapshot.tab_point_cursor();
-        let mut companion_wrap_point_cursor = companion_snapshot.wrap_point_cursor();
-
         let mut our_wrapper = |our_point: Point, bias: Bias| {
             our_wrap_point_cursor
                 .map(our_tab_point_cursor.map(
@@ -1265,18 +1260,18 @@ impl BlockMap {
                 .row()
         };
         let mut companion_wrapper = |their_point: Point, bias: Bias| {
-            companion_wrap_point_cursor
-                .map(
-                    companion_tab_point_cursor.map(
-                        companion_fold_point_cursor
-                            .map(companion_inlay_point_cursor.map(their_point, bias), bias),
-                    ),
-                )
-                .row()
+            // TODO(split-diff) fix companion points being passed in decreasing order
+            let inlay_point = companion_snapshot
+                .inlay_snapshot
+                .inlay_point_cursor()
+                .map(their_point, bias);
+            let fold_point = companion_snapshot.to_fold_point(inlay_point, bias);
+            let tab_point = companion_snapshot.fold_point_to_tab_point(fold_point);
+            companion_snapshot.tab_point_to_wrap_point(tab_point).row()
         };
         fn determine_spacer(
-            our_wrapper: &mut impl FnMut(Point, Bias) -> WrapRow,
-            companion_wrapper: &mut impl FnMut(Point, Bias) -> WrapRow,
+            our_wrapper: &mut dyn FnMut(Point, Bias) -> WrapRow,
+            companion_wrapper: &mut dyn FnMut(Point, Bias) -> WrapRow,
             our_point: Point,
             their_point: Point,
             delta: i32,
@@ -2635,9 +2630,11 @@ impl<'a> Iterator for BlockChunks<'a> {
         self.input_chunk.text = suffix;
         self.input_chunk.tabs >>= prefix_bytes.saturating_sub(1);
         self.input_chunk.chars >>= prefix_bytes.saturating_sub(1);
+        self.input_chunk.newlines >>= prefix_bytes.saturating_sub(1);
 
         let mut tabs = self.input_chunk.tabs;
         let mut chars = self.input_chunk.chars;
+        let mut newlines = self.input_chunk.newlines;
 
         if self.masked {
             // Not great for multibyte text because to keep cursor math correct we
@@ -2647,12 +2644,14 @@ impl<'a> Iterator for BlockChunks<'a> {
             prefix = unsafe { std::str::from_utf8_unchecked(&BULLETS[..bullet_len]) };
             chars = 1u128.unbounded_shl(bullet_len as u32).wrapping_sub(1);
             tabs = 0;
+            newlines = 0;
         }
 
         let chunk = Chunk {
             text: prefix,
             tabs,
             chars,
+            newlines,
             ..self.input_chunk.clone()
         };
 
@@ -4587,7 +4586,7 @@ mod tests {
         let diff = cx.new(|cx| {
             BufferDiff::new_with_base_text(base_text, &rhs_buffer.read(cx).text_snapshot(), cx)
         });
-        let lhs_buffer = diff.read_with(cx, |diff, _| diff.base_text_buffer());
+        let lhs_buffer = diff.read_with(cx, |diff, _| diff.base_text_buffer().clone());
 
         let lhs_multibuffer = cx.new(|cx| {
             let mut mb = MultiBuffer::new(Capability::ReadWrite);
@@ -4596,7 +4595,7 @@ mod tests {
                 [ExcerptRange::new(text::Anchor::MIN..text::Anchor::MAX)],
                 cx,
             );
-            mb.add_inverted_diff(diff.clone(), cx);
+            mb.add_inverted_diff(diff.clone(), rhs_buffer.clone(), cx);
             mb
         });
         let rhs_multibuffer = cx.new(|cx| {

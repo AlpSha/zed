@@ -1,6 +1,15 @@
-use std::{ops::Range, path::Path, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    ops::Range,
+    path::Path,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-use acp_thread::{AcpThread, AgentSessionInfo};
+use acp_thread::{AcpThread, AgentSessionInfo, MentionUri};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
@@ -12,7 +21,7 @@ use project::{
 use serde::{Deserialize, Serialize};
 use settings::{LanguageModelProviderSetting, LanguageModelSelection};
 
-use zed_actions::agent::{OpenClaudeAgentOnboardingModal, ReauthenticateAgent};
+use zed_actions::agent::{OpenClaudeAgentOnboardingModal, ReauthenticateAgent, ReviewBranchDiff};
 
 use crate::ui::{AcpOnboardingModal, ClaudeCodeOnboardingModal};
 use crate::{
@@ -24,16 +33,15 @@ use crate::{
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
     slash_command::SlashCommandCompletionProvider,
     text_thread_editor::{AgentPanelDelegate, TextThreadEditor, make_lsp_adapter_delegate},
-    ui::{AgentOnboardingModal, EndTrialUpsell},
+    ui::EndTrialUpsell,
+};
+use crate::{
+    AgentInitialContent, ExternalAgent, NewExternalAgentThread, NewNativeAgentThreadFromSummary,
 };
 use crate::{
     ExpandMessageEditor,
     acp::{AcpThreadHistory, ThreadHistoryEvent},
     text_thread_history::{TextThreadHistory, TextThreadHistoryEvent},
-};
-use crate::{
-    ExternalAgent, ExternalAgentInitialContent, NewExternalAgentThread,
-    NewNativeAgentThreadFromSummary,
 };
 use crate::{ManageProfiles, acp::thread_view::AcpThreadView};
 use agent_settings::AgentSettings;
@@ -72,9 +80,7 @@ use workspace::{
 };
 use zed_actions::{
     DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize,
-    agent::{
-        OpenAcpOnboardingModal, OpenOnboardingModal, OpenSettings, ResetAgentZoom, ResetOnboarding,
-    },
+    agent::{OpenAcpOnboardingModal, OpenSettings, ResetAgentZoom, ResetOnboarding},
     assistant::{OpenRulesLibrary, Toggle, ToggleFocus},
 };
 
@@ -232,9 +238,6 @@ pub fn init(cx: &mut App) {
                         });
                     }
                 })
-                .register_action(|workspace, _: &OpenOnboardingModal, window, cx| {
-                    AgentOnboardingModal::toggle(workspace, window, cx)
-                })
                 .register_action(|workspace, _: &OpenAcpOnboardingModal, window, cx| {
                     AcpOnboardingModal::toggle(workspace, window, cx)
                 })
@@ -247,7 +250,14 @@ pub fn init(cx: &mut App) {
                     window.dispatch_action(workspace::RestoreBanner.boxed_clone(), cx);
                     window.refresh();
                 })
-                .register_action(|_workspace, _: &ResetTrialUpsell, _window, cx| {
+                .register_action(|workspace, _: &ResetTrialUpsell, _window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, _| {
+                            panel
+                                .on_boarding_upsell_dismissed
+                                .store(false, Ordering::Release);
+                        });
+                    }
                     OnboardingUpsell::set_dismissed(false, cx);
                 })
                 .register_action(|_workspace, _: &ResetTrialEndUpsell, _window, cx| {
@@ -274,6 +284,47 @@ pub fn init(cx: &mut App) {
                             panel.load_thread_from_clipboard(window, cx);
                         });
                     }
+                })
+                .register_action(|workspace, action: &ReviewBranchDiff, window, cx| {
+                    let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                        return;
+                    };
+
+                    let mention_uri = MentionUri::GitDiff {
+                        base_ref: action.base_ref.to_string(),
+                    };
+                    let diff_uri = mention_uri.to_uri().to_string();
+
+                    let content_blocks = vec![
+                        acp::ContentBlock::Text(acp::TextContent::new(
+                            "Please review this branch diff carefully. Point out any issues, \
+                             potential bugs, or improvement opportunities you find.\n\n"
+                                .to_string(),
+                        )),
+                        acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                            acp::EmbeddedResourceResource::TextResourceContents(
+                                acp::TextResourceContents::new(
+                                    action.diff_text.to_string(),
+                                    diff_uri,
+                                ),
+                            ),
+                        )),
+                    ];
+
+                    workspace.focus_panel::<AgentPanel>(window, cx);
+
+                    panel.update(cx, |panel, cx| {
+                        panel.external_thread(
+                            None,
+                            None,
+                            Some(AgentInitialContent::ContentBlock {
+                                blocks: content_blocks,
+                                auto_submit: true,
+                            }),
+                            window,
+                            cx,
+                        );
+                    });
                 });
         },
     )
@@ -489,6 +540,7 @@ pub struct AgentPanel {
     selected_agent: AgentType,
     show_trust_workspace_message: bool,
     last_configuration_error_telemetry: Option<String>,
+    on_boarding_upsell_dismissed: AtomicBool,
 }
 
 impl AgentPanel {
@@ -708,11 +760,19 @@ impl AgentPanel {
                 .ok();
         });
 
+        let weak_panel = cx.entity().downgrade();
         let onboarding = cx.new(|cx| {
             AgentPanelOnboarding::new(
                 user_store.clone(),
                 client,
-                |_window, cx| {
+                move |_window, cx| {
+                    weak_panel
+                        .update(cx, |panel, _| {
+                            panel
+                                .on_boarding_upsell_dismissed
+                                .store(true, Ordering::Release);
+                        })
+                        .ok();
                     OnboardingUpsell::set_dismissed(true, cx);
                 },
                 cx,
@@ -768,6 +828,7 @@ impl AgentPanel {
             selected_agent: AgentType::default(),
             show_trust_workspace_message: false,
             last_configuration_error_telemetry: None,
+            on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed()),
         };
 
         // Initial sync of agent servers from extensions
@@ -884,7 +945,7 @@ impl AgentPanel {
         self.external_thread(
             Some(ExternalAgent::NativeAgent),
             None,
-            Some(ExternalAgentInitialContent::ThreadSummary(thread)),
+            Some(AgentInitialContent::ThreadSummary(thread)),
             window,
             cx,
         );
@@ -937,7 +998,7 @@ impl AgentPanel {
         &mut self,
         agent_choice: Option<crate::ExternalAgent>,
         resume_thread: Option<AgentSessionInfo>,
-        initial_content: Option<ExternalAgentInitialContent>,
+        initial_content: Option<AgentInitialContent>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1313,19 +1374,7 @@ impl AgentPanel {
 
     fn copy_thread_to_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.active_native_agent_thread(cx) else {
-            if let Some(workspace) = self.workspace.upgrade() {
-                workspace.update(cx, |workspace, cx| {
-                    struct NoThreadToast;
-                    workspace.show_toast(
-                        workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<NoThreadToast>(),
-                            "No active native thread to copy",
-                        )
-                        .autohide(),
-                        cx,
-                    );
-                });
-            }
+            Self::show_deferred_toast(&self.workspace, "No active native thread to copy", cx);
             return;
         };
 
@@ -1360,38 +1409,37 @@ impl AgentPanel {
         .detach_and_log_err(cx);
     }
 
-    fn load_thread_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            if let Some(workspace) = self.workspace.upgrade() {
+    fn show_deferred_toast(
+        workspace: &WeakEntity<workspace::Workspace>,
+        message: &'static str,
+        cx: &mut App,
+    ) {
+        let workspace = workspace.clone();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
                 workspace.update(cx, |workspace, cx| {
-                    struct NoClipboardToast;
+                    struct ClipboardToast;
                     workspace.show_toast(
                         workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<NoClipboardToast>(),
-                            "No clipboard content available",
+                            workspace::notifications::NotificationId::unique::<ClipboardToast>(),
+                            message,
                         )
                         .autohide(),
                         cx,
                     );
                 });
             }
+        });
+    }
+
+    fn load_thread_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            Self::show_deferred_toast(&self.workspace, "No clipboard content available", cx);
             return;
         };
 
         let Some(encoded) = clipboard.text() else {
-            if let Some(workspace) = self.workspace.upgrade() {
-                workspace.update(cx, |workspace, cx| {
-                    struct InvalidClipboardToast;
-                    workspace.show_toast(
-                        workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<InvalidClipboardToast>(),
-                            "Clipboard does not contain text",
-                        )
-                        .autohide(),
-                        cx,
-                    );
-                });
-            }
+            Self::show_deferred_toast(&self.workspace, "Clipboard does not contain text", cx);
             return;
         };
 
@@ -1399,19 +1447,11 @@ impl AgentPanel {
         {
             Ok(data) => data,
             Err(_) => {
-                if let Some(workspace) = self.workspace.upgrade() {
-                    workspace.update(cx, |workspace, cx| {
-                        struct DecodeErrorToast;
-                        workspace.show_toast(
-                            workspace::Toast::new(
-                                workspace::notifications::NotificationId::unique::<DecodeErrorToast>(),
-                                "Failed to decode clipboard content (expected base64)",
-                            )
-                            .autohide(),
-                            cx,
-                        );
-                    });
-                }
+                Self::show_deferred_toast(
+                    &self.workspace,
+                    "Failed to decode clipboard content (expected base64)",
+                    cx,
+                );
                 return;
             }
         };
@@ -1419,20 +1459,11 @@ impl AgentPanel {
         let shared_thread = match SharedThread::from_bytes(&thread_data) {
             Ok(thread) => thread,
             Err(_) => {
-                if let Some(workspace) = self.workspace.upgrade() {
-                    workspace.update(cx, |workspace, cx| {
-                        struct ParseErrorToast;
-                        workspace.show_toast(
-                            workspace::Toast::new(
-                                workspace::notifications::NotificationId::unique::<ParseErrorToast>(
-                                ),
-                                "Failed to parse thread data from clipboard",
-                            )
-                            .autohide(),
-                            cx,
-                        );
-                    });
-                }
+                Self::show_deferred_toast(
+                    &self.workspace,
+                    "Failed to parse thread data from clipboard",
+                    cx,
+                );
                 return;
             }
         };
@@ -1770,7 +1801,10 @@ impl AgentPanel {
         self.external_thread(
             None,
             None,
-            initial_text.map(ExternalAgentInitialContent::Text),
+            initial_text.map(|text| AgentInitialContent::ContentBlock {
+                blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+                auto_submit: false,
+            }),
             window,
             cx,
         );
@@ -1838,7 +1872,7 @@ impl AgentPanel {
         &mut self,
         server: Rc<dyn AgentServer>,
         resume_thread: Option<AgentSessionInfo>,
-        initial_content: Option<ExternalAgentInitialContent>,
+        initial_content: Option<AgentInitialContent>,
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
         ext_agent: ExternalAgent,
@@ -2765,7 +2799,7 @@ impl AgentPanel {
     }
 
     fn should_render_onboarding(&self, cx: &mut Context<Self>) -> bool {
-        if OnboardingUpsell::dismissed() {
+        if self.on_boarding_upsell_dismissed.load(Ordering::Acquire) {
             return false;
         }
 
@@ -2778,6 +2812,8 @@ impl AgentPanel {
                 .is_some_and(|date| date < chrono::Utc::now())
         {
             OnboardingUpsell::set_dismissed(true, cx);
+            self.on_boarding_upsell_dismissed
+                .store(true, Ordering::Release);
             return false;
         }
 
