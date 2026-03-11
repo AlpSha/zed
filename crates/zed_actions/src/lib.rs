@@ -469,6 +469,33 @@ pub mod agent {
         /// The base ref that the diff was computed against (e.g. "main").
         pub base_ref: SharedString,
     }
+
+    /// A single merge conflict region extracted from a file.
+    #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema)]
+    pub struct ConflictContent {
+        pub file_path: String,
+        pub conflict_text: String,
+        pub ours_branch_name: String,
+        pub theirs_branch_name: String,
+    }
+
+    /// Opens a new agent thread to resolve specific merge conflicts.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct ResolveConflictsWithAgent {
+        /// Individual conflicts with their full text.
+        pub conflicts: Vec<ConflictContent>,
+    }
+
+    /// Opens a new agent thread to resolve merge conflicts in the given file paths.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct ResolveConflictedFilesWithAgent {
+        /// File paths with unresolved conflicts (for project-wide resolution).
+        pub conflicted_file_paths: Vec<String>,
+    }
 }
 
 pub mod assistant {
@@ -639,15 +666,19 @@ actions!(
     ]
 );
 
-actions!(
-    debug_panel,
-    [
-        /// Toggles the debug panel.
-        Toggle,
-        /// Toggles focus on the debug panel.
-        ToggleFocus
-    ]
-);
+pub mod debug_panel {
+    use gpui::actions;
+    actions!(
+        debug_panel,
+        [
+            /// Toggles the debug panel.
+            Toggle,
+            /// Toggles focus on the debug panel.
+            ToggleFocus
+        ]
+    );
+}
+
 actions!(
     debugger,
     [
@@ -731,4 +762,18 @@ pub mod preview {
             ]
         );
     }
+}
+
+pub mod notebook {
+    use gpui::actions;
+
+    actions!(
+        notebook,
+        [
+            /// Move to down in cells
+            NotebookMoveDown,
+            /// Move to up in cells
+            NotebookMoveUp,
+        ]
+    );
 }
